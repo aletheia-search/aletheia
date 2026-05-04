@@ -11,7 +11,8 @@ def read_txt(path):
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             return f.read().lower()
-    except:
+    except Exception as e:
+        print("Error leyendo:", path, e)
         return ""
 
 
@@ -19,38 +20,50 @@ def read_txt(path):
 def home():
     return """
     <h1>Aletheia</h1>
-    <form action="/search">
+    <form action="/search" method="get">
         <input name="q" placeholder="Buscar...">
-        <button>Buscar</button>
+        <button type="submit">Buscar</button>
     </form>
     """
 
 
 @app.route("/search")
 def search():
-    q = request.args.get("q", "").lower()
+    try:
+        q = request.args.get("q", "").lower()
 
-    results = []
+        if not q:
+            return "<h3>Escribe algo para buscar</h3>"
 
-    for root, _, files in os.walk(DATA_DIR):
-        for file in files:
-            path = os.path.join(root, file)
+        results = []
 
-            if file.endswith(".txt"):
-                content = read_txt(path)
-            else:
-                continue
+        if not os.path.exists(DATA_DIR):
+            return "<h3>No existe carpeta /data</h3>"
 
-            if q in content:
-                results.append({
-                    "file": file,
-                    "path": path
-                })
+        for root, _, files in os.walk(DATA_DIR):
+            for file in files:
+                path = os.path.join(root, file)
 
-    return {
-        "query": q,
-        "results": results
-    }
+                if file.endswith(".txt"):
+                    content = read_txt(path)
+                else:
+                    continue
+
+                if q in content:
+                    results.append(file)
+
+        html = f"<h2>Resultados para: {q}</h2>"
+        html += f"<p>Total: {len(results)}</p><ul>"
+
+        for r in results:
+            html += f"<li>{r}</li>"
+
+        html += "</ul><a href='/'>Volver</a>"
+
+        return html
+
+    except Exception as e:
+        return f"<h3>Error interno: {e}</h3>"
 
 
 if __name__ == "__main__":
