@@ -66,8 +66,6 @@ def home():
     </form>
     """
 
-
-@app.route("/search")
 def search():
     q = request.args.get("q", "").lower()
 
