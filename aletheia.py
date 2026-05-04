@@ -11,61 +11,81 @@ def read_txt(path):
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             return f.read().lower()
-    except Exception as e:
-        print("Error leyendo:", path, e)
+    except:
+        return ""
+
+
+def read_pdf(path):
+    try:
+        import PyPDF2
+        text = ""
+        with open(path, "rb") as f:
+            reader = PyPDF2.PdfReader(f)
+            for page in reader.pages:
+                text += (page.extract_text() or "")
+        return text.lower()
+    except:
         return ""
 
 
 @app.route("/")
 def home():
     return """
-    <h1>Aletheia</h1>
-    <form action="/search" method="get">
-        <input name="q" placeholder="Buscar...">
-        <button type="submit">Buscar</button>
-    </form>
+    <html>
+    <head>
+        <title>Aletheia Search</title>
+        <style>
+            body { font-family: Arial; text-align: center; margin-top: 80px; }
+            input { width: 300px; padding: 10px; }
+            button { padding: 10px; }
+        </style>
+    </head>
+    <body>
+        <h1>Aletheia</h1>
+        <form action="/search">
+            <input name="q" placeholder="Buscar documentos...">
+            <button>Buscar</button>
+        </form>
+    </body>
+    </html>
     """
 
 
 @app.route("/search")
 def search():
-    try:
-        q = request.args.get("q", "").lower()
+    q = request.args.get("q", "").lower()
 
-        if not q:
-            return "<h3>Escribe algo para buscar</h3>"
+    results = []
 
-        results = []
+    for root, _, files in os.walk(DATA_DIR):
+        for file in files:
+            path = os.path.join(root, file)
 
-        if not os.path.exists(DATA_DIR):
-            return "<h3>No existe carpeta /data</h3>"
+            content = ""
 
-        for root, _, files in os.walk(DATA_DIR):
-            for file in files:
-                path = os.path.join(root, file)
+            if file.endswith(".txt"):
+                content = read_txt(path)
 
-                if file.endswith(".txt"):
-                    content = read_txt(path)
-                else:
-                    continue
+            elif file.endswith(".pdf"):
+                content = read_pdf(path)
 
-                if q in content:
-                    results.append(file)
+            if q in content:
+                results.append(file)
 
-        html = f"<h2>Resultados para: {q}</h2>"
-        html += f"<p>Total: {len(results)}</p><ul>"
+    html = f"""
+    <h2>Resultados para: {q}</h2>
+    <p>Total: {len(results)}</p>
+    <ul>
+    """
 
-        for r in results:
-            html += f"<li>{r}</li>"
+    for r in results:
+        html += f"<li>{r}</li>"
 
-        html += "</ul><a href='/'>Volver</a>"
+    html += "</ul><br><a href='/'>Volver</a>"
 
-        return html
-
-    except Exception as e:
-        return f"<h3>Error interno: {e}</h3>"
+    return html
 
 
 if __name__ == "__main__":
-    print("Aletheia ONLINE")
+    print("Aletheia ONLINE READY")
     app.run(host="0.0.0.0", port=8080)
