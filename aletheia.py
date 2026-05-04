@@ -15,17 +15,12 @@ def read_txt(path):
         return ""
 
 
-def read_pdf(path):
-    try:
-        import PyPDF2
-        text = ""
-        with open(path, "rb") as f:
-            reader = PyPDF2.PdfReader(f)
-            for page in reader.pages:
-                text += (page.extract_text() or "")
-        return text.lower()
-    except:
-        return ""
+def clean_filename(name):
+    # elimina números iniciales tipo "4 - archivo.pdf"
+    parts = name.split(" ", 1)
+    if len(parts) > 1 and parts[0].replace(".", "").isdigit():
+        return parts[1]
+    return name
 
 
 @app.route("/")
@@ -35,17 +30,53 @@ def home():
     <head>
         <title>Aletheia Search</title>
         <style>
-            body { font-family: Arial; text-align: center; margin-top: 80px; }
-            input { width: 300px; padding: 10px; }
-            button { padding: 10px; }
+            body {
+                font-family: Arial;
+                background: #f4f4f4;
+                margin: 0;
+                padding: 0;
+                text-align: center;
+            }
+
+            .container {
+                margin-top: 120px;
+            }
+
+            h1 {
+                font-size: 40px;
+                margin-bottom: 20px;
+            }
+
+            input {
+                width: 400px;
+                padding: 12px;
+                font-size: 16px;
+            }
+
+            button {
+                padding: 12px 20px;
+                font-size: 16px;
+                cursor: pointer;
+            }
+
+            .result {
+                background: white;
+                margin: 10px auto;
+                padding: 10px;
+                width: 60%;
+                border-radius: 8px;
+                text-align: left;
+            }
         </style>
     </head>
     <body>
-        <h1>Aletheia</h1>
-        <form action="/search">
-            <input name="q" placeholder="Buscar documentos...">
-            <button>Buscar</button>
-        </form>
+        <div class="container">
+            <h1>Aletheia</h1>
+            <form action="/search">
+                <input name="q" placeholder="Buscar documentos...">
+                <button type="submit">Buscar</button>
+            </form>
+        </div>
     </body>
     </html>
     """
@@ -61,31 +92,46 @@ def search():
         for file in files:
             path = os.path.join(root, file)
 
-            content = ""
-
             if file.endswith(".txt"):
                 content = read_txt(path)
 
-            elif file.endswith(".pdf"):
-                content = read_pdf(path)
-
-            if q in content:
-                results.append(file)
+                if q in content:
+                    results.append(clean_filename(file))
 
     html = f"""
-    <h2>Resultados para: {q}</h2>
-    <p>Total: {len(results)}</p>
-    <ul>
+    <html>
+    <head>
+        <title>Resultados</title>
+        <style>
+            body {{ font-family: Arial; background: #f4f4f4; }}
+            .box {{
+                background: white;
+                margin: 10px auto;
+                padding: 15px;
+                width: 70%;
+                border-radius: 8px;
+            }}
+        </style>
+    </head>
+    <body>
+        <h2 style="text-align:center;">Resultados para: {q}</h2>
+        <p style="text-align:center;">Total: {len(results)}</p>
     """
 
     for r in results:
-        html += f"<li>{r}</li>"
+        html += f'<div class="box">{r}</div>'
 
-    html += "</ul><br><a href='/'>Volver</a>"
+    html += """
+        <div style="text-align:center; margin-top:20px;">
+            <a href="/">Volver</a>
+        </div>
+    </body>
+    </html>
+    """
 
     return html
 
 
 if __name__ == "__main__":
-    print("Aletheia ONLINE READY")
+    print("Aletheia UI READY")
     app.run(host="0.0.0.0", port=8080)
