@@ -9,6 +9,34 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 
 INDEX = []
 
+@app.route("/search")
+def search():
+    q = request.args.get("q", "").lower()
+
+    results = []
+
+    for root, _, files in os.walk(DATA_DIR):
+        for file in files:
+            path = os.path.join(root, file)
+
+            content = ""
+
+            if file.endswith(".txt"):
+                content = read_txt(path)
+
+            elif file.endswith(".pdf"):
+                continue  # ignoramos PDFs por ahora
+
+            if q in content:
+                results.append({
+                    "file": file,
+                    "path": path
+                })
+
+    return {
+        "query": q,
+        "results": results
+    }
 
 def read_txt(path):
     try:
