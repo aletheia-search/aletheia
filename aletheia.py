@@ -1,8 +1,7 @@
+from flask import Flask, request, redirect
 import urllib.parse
-from flask import Flask, request
 
 app = Flask(__name__)
-
 
 # -----------------------------
 # HOME
@@ -69,53 +68,43 @@ def home():
 
 
 # -----------------------------
-# SEARCH WEB ONLY
+# INTENT ENGINE (REDIRECCIÓN DIRECTA)
 # -----------------------------
 @app.route("/search")
 def search():
-    q = request.args.get("q", "").strip()
+    q = request.args.get("q", "").strip().lower()
 
     if not q:
-        return "<a href='/'>Volver</a>"
+        return redirect("/")
 
+    # -------------------------
+    # ATAJOS DIRECTOS
+    # -------------------------
+    if q == "python":
+        return redirect("https://www.python.org")
+
+    if q == "wikipedia":
+        return redirect("https://www.wikipedia.org")
+
+    if q == "google":
+        return redirect("https://www.google.com")
+
+    if q == "bing":
+        return redirect("https://www.bing.com")
+
+    if q == "amazon":
+        return redirect("https://www.amazon.es")
+
+    # -------------------------
+    # DEFAULT: GOOGLE SEARCH
+    # -------------------------
     encoded = urllib.parse.quote(q)
-
-    return f"""
-    <html>
-    <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Resultados</title>
-    </head>
-
-    <body style="font-family:Arial;text-align:center;margin-top:60px;">
-
-        <h2>Buscar: {q}</h2>
-
-        <a href="https://www.google.com/search?q={encoded}" target="_blank">
-            🔎 Google
-        </a>
-        <br><br>
-
-        <a href="https://es.wikipedia.org/wiki/Special:Search?search={encoded}" target="_blank">
-            📚 Wikipedia
-        </a>
-        <br><br>
-
-        <a href="https://www.bing.com/search?q={encoded}" target="_blank">
-            🌐 Bing
-        </a>
-
-        <br><br>
-        <a href="/">Volver</a>
-
-    </body>
-    </html>
-    """
+    return redirect(f"https://www.google.com/search?q={encoded}")
 
 
 # -----------------------------
 # START
 # -----------------------------
 if __name__ == "__main__":
-    print("Aletheia WEB MODE ONLINE")
+    print("Aletheia FINAL MODE ONLINE")
     app.run(host="0.0.0.0", port=8080)
