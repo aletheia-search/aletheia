@@ -1,0 +1,1 @@
+{"documents": {"data\\ejemplo.txt": "hola mundo\nbuscador aletheia\nprueba sistema\n"}, "doc_tokens": {"data\\ejemplo.txt": ["hola", "mundo", "buscador", "aletheia", "prueba", "sistema"]}, "doc_length": {"data\\ejemplo.txt": 6}, "doc_mtime": {"data\\ejemplo.txt": 1777839672.387237}, "doc_freq": {"sistema": 2, "buscador": 2, "hola": 2, "prueba": 2, "aletheia": 2, "mundo": 2}}
