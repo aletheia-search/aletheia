@@ -1,4 +1,4 @@
-from flask import Flask, request, redirect
+from flask import Flask, request
 import urllib.parse
 
 app = Flask(__name__)
@@ -30,50 +30,55 @@ def home():
 
 
 # -----------------------------
-# INTENT ENGINE SIMPLE
+# SEARCH ENGINE
 # -----------------------------
 @app.route("/search")
 def search():
     q = request.args.get("q", "").strip().lower()
 
     if not q:
-        return redirect("/")
+        return home()
 
     encoded = urllib.parse.quote(q)
 
+    def go(url):
+        # abre en nueva pestaña y vuelve a Aletheia
+        return f"""
+        <html>
+        <script>
+            window.open("{url}", "_blank");
+            window.location = "/";
+        </script>
+        </html>
+        """
+
     # -----------------------------
-    # INTENCIONES DIRECTAS
+    # INTENCIONES
     # -----------------------------
 
-    # Python
     if "python" in q:
         if "tutorial" in q or "curso" in q:
-            return redirect("https://www.youtube.com/results?search_query=python+tutorial")
-        return redirect("https://www.python.org")
+            return go("https://www.youtube.com/results?search_query=python+tutorial")
+        return go("https://www.python.org")
 
-    # Wikipedia
     if "wikipedia" in q or "que es" in q:
-        return redirect(f"https://es.wikipedia.org/wiki/Special:Search?search={encoded}")
+        return go(f"https://es.wikipedia.org/wiki/Special:Search?search={encoded}")
 
-    # YouTube
     if "youtube" in q:
-        return redirect(f"https://www.youtube.com/results?search_query={encoded}")
+        return go(f"https://www.youtube.com/results?search_query={encoded}")
 
-    # Amazon / compra
-    if "comprar" in q or "precio" in q:
-        return redirect(f"https://www.amazon.es/s?k={encoded}")
+    if "amazon" in q or "comprar" in q:
+        return go(f"https://www.amazon.es/s?k={encoded}")
 
-    # Noticias
     if "noticias" in q:
-        return redirect(f"https://www.google.com/search?q={encoded}")
+        return go(f"https://www.google.com/search?q={encoded}")
 
-    # Google fallback
-    return redirect(f"https://www.google.com/search?q={encoded}")
+    return go(f"https://www.google.com/search?q={encoded}")
 
 
 # -----------------------------
 # START
 # -----------------------------
 if __name__ == "__main__":
-    print("Aletheia INTENT ENGINE v2 ONLINE")
+    print("Aletheia INTENT ENGINE v3 ONLINE")
     app.run(host="0.0.0.0", port=8080)
