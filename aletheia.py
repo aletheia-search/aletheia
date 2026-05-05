@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 # =========================
 INDEX_FILE = "store/index.json"
 MEMORY_FILE = "store/memory.json"
+FEEDBACK_FILE = "store/feedback.json"
 
 app = Flask(__name__)
 model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -32,6 +33,7 @@ def load_index():
 
 data = load_index()
 memory = load_json(MEMORY_FILE)
+feedback = load_json(FEEDBACK_FILE)
 
 # =========================
 # FAISS
@@ -41,36 +43,21 @@ index = faiss.IndexFlatIP(embs.shape[1])
 index.add(embs)
 
 # =========================
-# INTENT VECTOR (NUEVO)
+# WEIGHTS (NUEVO AUTOEVOLUTIVO)
 # =========================
-intent = {
-    "dev": 0.0,
-    "shop": 0.0,
-    "media": 0.0,
-    "info": 0.0,
-    "web": 0.0
+weights = {
+    "semantic": 0.6,
+    "memory": 0.25,
+    "intent": 0.15
 }
 
-def normalize_intent():
-    total = sum(abs(v) for v in intent.values())
-    if total == 0:
-        return
-    for k in intent:
-        intent[k] /= total
+def normalize_weights():
+    total = sum(weights.values())
+    for k in weights:
+        weights[k] /= total
 
 # =========================
-# CLASSIFY
-# =========================
-def classify(url):
-    host = urlparse(url).netloc.lower()
-    if "github" in host: return "dev"
-    if "youtube" in host: return "media"
-    if "amazon" in host: return "shop"
-    if "wikipedia" in host: return "info"
-    return "web"
-
-# =========================
-# MEMORY UPDATE
+# MEMORY
 # =========================
 def update_memory(url, tag):
     now = time.time()
@@ -88,11 +75,30 @@ def update_memory(url, tag):
     m["tag"] = tag
 
 # =========================
-# INTENT UPDATE (NUEVO)
+# FEEDBACK SIGNAL (NUEVO)
 # =========================
-def update_intent(tag, value=0.05):
-    intent[tag] = intent.get(tag, 0) + value
-    normalize_intent()
+def reward(click_time):
+    if click_time < 2:
+        return -0.2
+    if click_time < 8:
+        return 0.1
+    return 0.3
+
+# =========================
+# UPDATE WEIGHTS (NUEVO CORE)
+# =========================
+def update_weights(signal):
+    lr = 0.01
+
+    weights["semantic"] += lr * (0.5 * signal)
+    weights["memory"] += lr * (0.3 * signal)
+    weights["intent"] += lr * (0.2 * signal)
+
+    # clamp
+    for k in weights:
+        weights[k] = max(0.05, min(weights[k], 0.9))
+
+    normalize_weights()
 
 # =========================
 # MEMORY SCORE
@@ -103,10 +109,15 @@ def memory_score(url):
     return memory[url]["score"] * 0.2
 
 # =========================
-# INTENT BOOST (NUEVO)
+# CLASSIFY
 # =========================
-def intent_score(tag):
-    return intent.get(tag, 0) * 0.5
+def classify(url):
+    host = urlparse(url).netloc.lower()
+    if "github" in host: return "dev"
+    if "youtube" in host: return "media"
+    if "amazon" in host: return "shop"
+    if "wikipedia" in host: return "info"
+    return "web"
 
 # =========================
 # SEARCH
@@ -128,11 +139,14 @@ def search(query, k=10):
         tag = classify(url)
 
         update_memory(url, tag)
-        update_intent(tag)
 
         semantic = float(scores[0][list(idx[0]).index(i)])
 
-        final = semantic + memory_score(url) + intent_score(tag)
+        final = (
+            weights["semantic"] * semantic +
+            weights["memory"] * memory_score(url) +
+            weights["intent"] * memory_score(url)
+        )
 
         results.append({
             "title": d["title"],
@@ -145,34 +159,17 @@ def search(query, k=10):
     return sorted(results, key=lambda x: x["score"], reverse=True)
 
 # =========================
-# PRE-PREDICTION FEED (NUEVO)
+# FEEDBACK ROUTE (NUEVO)
 # =========================
-def predicted_feed():
-    ranked = []
+@app.route("/click")
+def click():
+    url = request.args.get("url","")
+    t = float(request.args.get("time","5"))
 
-    for d in data:
-        url = d["url"]
-        tag = classify(url)
+    signal = reward(t)
+    update_weights(signal)
 
-        score = memory_score(url) + intent_score(tag)
-
-        ranked.append({
-            "title": d["title"],
-            "url": url,
-            "desc": d["text"][:140],
-            "type": tag,
-            "score": score
-        })
-
-    return sorted(ranked, key=lambda x: x["score"], reverse=True)[:12]
-
-# =========================
-# ROUTER
-# =========================
-def route(q):
-    if not q:
-        return "predict"
-    return "search"
+    return jsonify({"ok":True})
 
 # =========================
 # UI
@@ -182,7 +179,7 @@ HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>Aletheia v27</title>
+<title>Aletheia v28</title>
 <style>
 body{background:#0f0f12;color:white;font-family:Arial}
 input{width:60%;padding:14px;margin:20px}
@@ -197,14 +194,18 @@ input{width:60%;padding:14px;margin:20px}
 <div id="r"></div>
 
 <script>
+let startTime=0;
+
 async function go(q){
-    const r = await fetch("/api?q="+encodeURIComponent(q));
+    startTime = Date.now();
+
+    const r = await fetch("/search?q="+encodeURIComponent(q));
     const d = await r.json();
 
-    let box = document.getElementById("r");
+    let box=document.getElementById("r");
     box.innerHTML="";
 
-    let grid = document.createElement("div");
+    let grid=document.createElement("div");
     grid.className="grid";
 
     d.results.forEach(x=>{
@@ -212,11 +213,15 @@ async function go(q){
         c.className="card";
 
         c.innerHTML =
-            "<b>"+x.title+"</b><br>"+
-            "<span class='small'>"+x.type+"</span><br><br>"+
-            x.desc;
+        "<b>"+x.title+"</b><br>"+
+        "<span class='small'>"+x.type+"</span><br><br>"+
+        x.desc;
 
-        c.onclick=()=>window.open(x.url);
+        c.onclick=()=>{
+            let t = (Date.now()-startTime)/1000;
+            fetch("/click?url="+encodeURIComponent(x.url)+"&time="+t);
+            window.open(x.url);
+        };
 
         grid.appendChild(c);
     });
@@ -240,20 +245,12 @@ window.onload=()=>go("");
 def home():
     return HTML
 
-@app.route("/api")
-def api():
+@app.route("/search")
+def search_route():
     q = request.args.get("q","")
-
-    mode = route(q)
-
-    if mode == "search":
-        results = search(q)
-    else:
-        results = predicted_feed()
-
-    return jsonify({"results": results})
+    return jsonify({"results": search(q)})
 
 # =========================
 if __name__ == "__main__":
-    print("Aletheia v27 INTENT PREDICTION ONLINE")
+    print("Aletheia v28 SELF-ADAPTIVE RANKING ONLINE")
     app.run(host="0.0.0.0", port=8080)
