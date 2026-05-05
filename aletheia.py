@@ -8,6 +8,7 @@ import json
 import os
 import time
 import hashlib
+import threading
 
 app = Flask(__name__)
 
@@ -23,20 +24,23 @@ model = SentenceTransformer("all-MiniLM-L6-v2")
 INDEX_FILE = "index.json"
 MAX_INDEX = 800
 
+
 def load_json(path, default):
     if os.path.exists(path):
         with open(path, "r") as f:
             return json.load(f)
     return default
 
+
 def save_json(path, data):
     with open(path, "w") as f:
         json.dump(data, f)
 
+
 INDEX = load_json(INDEX_FILE, [])
 
 # -----------------------------
-# EMB CACHE
+# CACHE EMBEDDINGS
 # -----------------------------
 EMB = {}
 
@@ -47,18 +51,9 @@ def embed(t):
     EMB[t] = v
     return v
 
+
 def cosine(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
-
-
-# -----------------------------
-# USER
-# -----------------------------
-def uid():
-    u = request.cookies.get("uid")
-    if not u:
-        u = hashlib.md5(str(time.time()).encode()).hexdigest()
-    return u
 
 
 # -----------------------------
@@ -78,7 +73,30 @@ def extract(url):
 
 
 # -----------------------------
-# SEARCH (UI LIMPIA)
+# CRAWLER ASÍNCRONO
+# -----------------------------
+def crawl_worker(url):
+    global INDEX
+
+    if len(INDEX) >= MAX_INDEX:
+        return
+
+    title, text = extract(url)
+    if not text:
+        return
+
+    INDEX.append({
+        "url": url,
+        "title": title,
+        "text": text,
+        "emb": embed(text)
+    })
+
+    save_json(INDEX_FILE, INDEX)
+
+
+# -----------------------------
+# SEARCH
 # -----------------------------
 @app.route("/search")
 def search():
@@ -91,90 +109,47 @@ def search():
     results = []
 
     for item in INDEX:
-        sim = cosine(q_emb, item["emb"])
-        score = sim * 10
+        score = cosine(q_emb, item["emb"]) * 10
 
         if score > 2:
             results.append(item)
 
     results.sort(key=lambda x: cosine(q_emb, x["emb"]), reverse=True)
 
-    html = f"""
-    <html>
-    <head>
-        <title>Aletheia</title>
-        <style>
-            body {{
-                font-family: Arial;
-                margin: 0;
-                background: #fff;
-            }}
-            .top {{
-                text-align:center;
-                margin-top:40px;
-            }}
-            input {{
-                width: 60%;
-                padding: 12px;
-                font-size: 16px;
-            }}
-            button {{
-                padding: 12px 16px;
-                font-size: 16px;
-            }}
-            .result {{
-                margin: 20px auto;
-                width: 60%;
-                padding: 10px;
-            }}
-            a {{
-                font-size: 18px;
-                text-decoration: none;
-                color: #1a0dab;
-            }}
-            a:hover {{
-                text-decoration: underline;
-            }}
-            .snippet {{
-                color: #555;
-                font-size: 13px;
-            }}
-        </style>
-    </head>
-
-    <body>
-
-    <div class="top">
-        <h1>Aletheia</h1>
-
-        <form action="/search">
-            <input name="q" value="{q}">
-            <button>Buscar</button>
-        </form>
-    </div>
-
-    <hr>
-    """
+    html = "<html><body style='font-family:Arial;margin:40px;'><h2>Resultados</h2><hr>"
 
     for r in results[:10]:
         html += f"""
-        <div class="result">
-            <a href="/go?url={urllib.parse.quote(r['url'])}">
+        <div style="margin:20px 0;">
+            <a href="/go?url={urllib.parse.quote(r['url'])}" style="font-size:18px;">
                 {r['title']}
             </a>
-            <div class="snippet">{r['text'][:120]}</div>
+            <div style="color:gray;">{r['text'][:120]}</div>
         </div>
         """
 
     html += "</body></html>"
-
-    resp = make_response(html)
-    resp.set_cookie("uid", uid())
-    return resp
+    return html
 
 
 # -----------------------------
-# CLICK TRACK
+# CRAWL (NO BLOQUEANTE)
+# -----------------------------
+@app.route("/crawl")
+def crawl():
+    url = request.args.get("url", "")
+    if not url:
+        return "URL vacía"
+
+    # hilo separado (IMPORTANTE para Railway)
+    thread = threading.Thread(target=crawl_worker, args=(url,))
+    thread.start()
+
+    return f"Crawling en background: {url}"
+
+
+# -----------------------------
+# CLICK
 # -----------------------------
 @app.route("/go")
 def go():
@@ -185,31 +160,6 @@ def go():
 
 
 # -----------------------------
-# CRAWL
-# -----------------------------
-@app.route("/crawl")
-def crawl():
-    url = request.args.get("url", "")
-    if not url or len(INDEX) >= MAX_INDEX:
-        return "Error"
-
-    title, text = extract(url)
-    if not text:
-        return "Error"
-
-    INDEX.append({
-        "url": url,
-        "title": title,
-        "text": text,
-        "emb": embed(text)
-    })
-
-    save_json(INDEX_FILE, INDEX)
-
-    return f"Indexado: {title}"
-
-
-# -----------------------------
 # HOME
 # -----------------------------
 @app.route("/")
@@ -217,16 +167,21 @@ def home():
     return """
     <html>
     <body style="font-family:Arial;text-align:center;margin-top:80px;">
-        <h1>Aletheia</h1>
+        <h1>Aletheia v32</h1>
 
         <form action="/search">
-            <input name="q" placeholder="Buscar en Aletheia">
+            <input name="q" placeholder="Buscar">
             <button>Buscar</button>
         </form>
 
-        <p style="color:gray;margin-top:20px;">
-            Motor de búsqueda IA
-        </p>
+        <br>
+
+        <form action="/crawl">
+            <input name="url" placeholder="Indexar URL">
+            <button>Crawl async</button>
+        </form>
+
+        <p>Sistema estable con crawling en segundo plano</p>
     </body>
     </html>
     """
