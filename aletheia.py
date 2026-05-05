@@ -2,6 +2,7 @@ from flask import Flask, request
 import urllib.parse
 import sqlite3
 import feedparser
+import time
 
 app = Flask(__name__)
 
@@ -18,6 +19,13 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS clicks (
             url TEXT PRIMARY KEY,
+            count INTEGER
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS searches (
+            query TEXT PRIMARY KEY,
             count INTEGER
         )
     """)
@@ -58,28 +66,43 @@ def get_click_score(url):
 
 
 # -----------------------------
-# RSS NEWS
+# SEARCH MEMORY
 # -----------------------------
-def get_news(query):
-    try:
-        feed = feedparser.parse(
-            f"https://news.google.com/rss/search?q={query}&hl=es&gl=ES&ceid=ES:es"
-        )
+def register_search(q):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
 
-        items = []
+    c.execute("SELECT count FROM searches WHERE query=?", (q,))
+    row = c.fetchone()
 
-        for entry in feed.entries[:5]:
-            items.append({
-                "title": entry.title,
-                "link": entry.link,
-                "snippet": "Noticia actualizada desde Google News RSS",
-                "score": 2
-            })
+    if row:
+        c.execute("UPDATE searches SET count=count+1 WHERE query=?", (q,))
+    else:
+        c.execute("INSERT INTO searches (query, count) VALUES (?, 1)", (q,))
 
-        return items
+    conn.commit()
+    conn.close()
 
-    except:
-        return []
+
+def get_search_score(q):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT count FROM searches WHERE query=?", (q,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
+# -----------------------------
+# REDIRECT TRACKER
+# -----------------------------
+@app.route("/go")
+def go():
+    url = request.args.get("url")
+    if url:
+        register_click(url)
+        return f'<script>window.open("{url}", "_blank"); window.location="/";</script>'
+    return redirect("/")
 
 
 # -----------------------------
@@ -102,19 +125,7 @@ def home():
 
 
 # -----------------------------
-# REDIRECT TRACKER
-# -----------------------------
-@app.route("/go")
-def go():
-    url = request.args.get("url")
-    if url:
-        register_click(url)
-        return f'<script>window.open("{url}", "_blank"); window.location="/";</script>'
-    return redirect("/")
-
-
-# -----------------------------
-# SEARCH ENGINE MULTI-FUENTE
+# SEARCH ENGINE (RANKING INTELIGENTE)
 # -----------------------------
 @app.route("/search")
 def search():
@@ -122,77 +133,52 @@ def search():
     if not q:
         return home()
 
+    register_search(q)
+
     encoded = urllib.parse.quote(q)
     ql = q.lower()
 
     results = []
 
     def add(title, link, snippet, base_score):
+        click_boost = get_click_score(link)
+        search_boost = get_search_score(q)
+
+        score = base_score + click_boost + (search_boost * 0.5)
+
         results.append({
             "title": title,
             "link": f"/go?url={urllib.parse.quote(link, safe='')}",
             "snippet": snippet,
-            "score": base_score + get_click_score(link)
+            "score": score
         })
 
     # -----------------------------
-    # WIKIPEDIA / CONOCIMIENTO
+    # INTENCIONES
     # -----------------------------
-    if "wikipedia" in ql or "que es" in ql:
-        add(
-            "Wikipedia",
-            f"https://es.wikipedia.org/wiki/Special:Search?search={encoded}",
-            "Enciclopedia colaborativa.",
-            3
-        )
-
     if "python" in ql:
-        add(
-            "Python oficial",
-            "https://www.python.org",
-            "Lenguaje de programación.",
-            3
-        )
+        add("Python oficial", "https://www.python.org", "Lenguaje de programación.", 3)
+        add("Python tutorial YouTube", "https://www.youtube.com/results?search_query=python+tutorial", "Aprende Python.", 2)
 
-    # -----------------------------
-    # VIDEO
-    # -----------------------------
-    if "youtube" in ql or "video" in ql:
-        add(
-            "YouTube",
-            f"https://www.youtube.com/results?search_query={encoded}",
-            "Plataforma de vídeos.",
-            2
-        )
+    if "youtube" in ql:
+        add("YouTube", f"https://www.youtube.com/results?search_query={encoded}", "Vídeos.", 2)
 
-    # -----------------------------
-    # COMPRAS
-    # -----------------------------
+    if "wikipedia" in ql or "que es" in ql:
+        add("Wikipedia", f"https://es.wikipedia.org/wiki/Special:Search?search={encoded}", "Enciclopedia.", 3)
+
     if "amazon" in ql or "comprar" in ql:
-        add(
-            "Amazon",
-            f"https://www.amazon.es/s?k={encoded}",
-            "Tienda online.",
-            3
-        )
+        add("Amazon", f"https://www.amazon.es/s?k={encoded}", "Tienda online.", 3)
 
-    # -----------------------------
-    # NOTICIAS RSS (NUEVO)
-    # -----------------------------
-    news = get_news(q)
-    results.extend(news)
+    if "noticias" in ql:
+        feed = feedparser.parse(f"https://news.google.com/rss/search?q={encoded}&hl=es&gl=ES&ceid=ES:es")
+        for e in feed.entries[:5]:
+            add(e.title, e.link, "Noticia reciente", 2)
 
-    # fallback
     if not results:
-        add(
-            "Google",
-            f"https://www.google.com/search?q={encoded}",
-            "Búsqueda general.",
-            1
-        )
+        add("Google", f"https://www.google.com/search?q={encoded}", "Búsqueda general.", 1)
 
     # -----------------------------
-    # RANKING
+    # RANKING FINAL
     # -----------------------------
     results.sort(key=lambda x: x["score"], reverse=True)
 
@@ -213,7 +199,7 @@ def search():
                 {r['title']}
             </a>
             <div style="font-size:13px;color:gray;">
-                {r['snippet']}
+                {r['snippet']} (score: {round(r['score'],2)})
             </div>
         </div>
         """
