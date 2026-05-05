@@ -1,6 +1,8 @@
 from flask import Flask, request
 import urllib.parse
 import numpy as np
+import json
+import os
 from sentence_transformers import SentenceTransformer
 
 app = Flask(__name__)
@@ -10,9 +12,30 @@ app = Flask(__name__)
 # -----------------------------
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
+# warmup (evita lag inicial)
+_ = model.encode(["warmup"])
+
 
 # -----------------------------
-# CORPUS
+# CLICK MEMORY PERSISTENTE
+# -----------------------------
+CLICK_FILE = "clicks.json"
+
+def load_clicks():
+    if os.path.exists(CLICK_FILE):
+        with open(CLICK_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_clicks():
+    with open(CLICK_FILE, "w") as f:
+        json.dump(CLICK_MEMORY, f)
+
+CLICK_MEMORY = load_clicks()
+
+
+# -----------------------------
+# CORPUS BASE
 # -----------------------------
 CORPUS = [
     ("python programacion tutorial codigo lenguaje", "https://www.python.org", "Lenguaje de programación Python"),
@@ -29,12 +52,6 @@ CORPUS = [
 # -----------------------------
 TEXTS = [c[0] for c in CORPUS]
 EMBEDDINGS = model.encode(TEXTS, convert_to_numpy=True)
-
-
-# -----------------------------
-# MEMORIA EN RUNTIME (SIN BD)
-# -----------------------------
-CLICK_MEMORY = {}   # url -> clicks
 
 
 # -----------------------------
@@ -57,16 +74,15 @@ def home():
 
 
 # -----------------------------
-# CLICK TRACKING (MEMORIA RAM)
+# CLICK TRACKING
 # -----------------------------
 @app.route("/go")
 def go():
     url = request.args.get("url")
-
     if url:
         CLICK_MEMORY[url] = CLICK_MEMORY.get(url, 0) + 1
+        save_clicks()
         return f'<script>window.open("{url}", "_blank"); window.location="/";</script>'
-
     return home()
 
 
@@ -91,7 +107,7 @@ def search():
 
     results = []
 
-    def click_boost(url):
+    def boost(url):
         return CLICK_MEMORY.get(url, 0) * 0.5
 
     def add(title, link, snippet, score):
@@ -103,20 +119,17 @@ def search():
         })
 
     # -----------------------------
-    # RANKING HÍBRIDO
+    # MATCH SEMÁNTICO
     # -----------------------------
     for i, (text, link, snippet) in enumerate(CORPUS):
-
         sim = cosine(q_emb, EMBEDDINGS[i])
 
         if sim > 0.30:
-            final_score = (sim * 10) + click_boost(link)
-
             add(
                 text.split()[0].title(),
                 link,
                 snippet,
-                final_score
+                sim * 10 + boost(link)
             )
 
     # -----------------------------
@@ -131,7 +144,7 @@ def search():
         )
 
     # -----------------------------
-    # ORDENAR
+    # ORDER
     # -----------------------------
     results.sort(key=lambda x: x["score"], reverse=True)
 
