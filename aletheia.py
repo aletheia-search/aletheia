@@ -1,12 +1,9 @@
 import json
 import numpy as np
 import faiss
-import time
 from flask import Flask, request, jsonify, render_template_string
 from sentence_transformers import SentenceTransformer
-from urllib.parse import urlparse, urljoin
-import requests
-from bs4 import BeautifulSoup
+from urllib.parse import urlparse
 
 # =========================
 # CONFIG
@@ -36,26 +33,11 @@ data = load_index()
 graph = load_json(GRAPH_FILE)
 
 # =========================
-# BUILD GRAPH INIT
+# EMBEDDINGS
 # =========================
-if not graph:
-    graph = {}
-
-# =========================
-# EXTRACT LINKS (NUEVO)
-# =========================
-def extract_links(url):
-    try:
-        r = requests.get(url, timeout=3)
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        links = []
-        for a in soup.find_all("a", href=True):
-            links.append(urljoin(url, a["href"]))
-
-        return links[:10]
-    except:
-        return []
+embs = np.array([d["emb"] for d in data]).astype("float32")
+index = faiss.IndexFlatIP(embs.shape[1])
+index.add(embs)
 
 # =========================
 # CLASSIFY
@@ -69,85 +51,116 @@ def classify(url):
     return "web"
 
 # =========================
-# UPDATE GRAPH (NUEVO CORE)
+# ENTRY NODE
 # =========================
-def update_graph(url):
-    if url not in graph:
-        graph[url] = {
-            "links": [],
-            "neighbors": {},
-            "score": 0
-        }
-
-    links = extract_links(url)
-
-    for l in links:
-        if l == url:
-            continue
-
-        if l not in graph:
-            graph[l] = {
-                "links": [],
-                "neighbors": {},
-                "score": 0
-            }
-
-        # conexión bidireccional
-        graph[url]["neighbors"][l] = graph[url]["neighbors"].get(l, 0) + 1
-        graph[l]["neighbors"][url] = graph[l]["neighbors"].get(url, 0) + 1
-
-    graph[url]["links"] = links
-
-# =========================
-# GRAPH SCORE (NUEVO)
-# =========================
-def graph_score(url):
-    if url not in graph:
-        return 0
-
-    g = graph[url]
-
-    neighbor_strength = sum(g["neighbors"].values()) / 10
-
-    return min(neighbor_strength, 1.0)
-
-# =========================
-# SEARCH CORE
-# =========================
-embs = np.array([d["emb"] for d in data]).astype("float32")
-index = faiss.IndexFlatIP(embs.shape[1])
-index.add(embs)
-
-def search(query, k=12):
+def get_entry(query):
     qv = model.encode([query], normalize_embeddings=True)
     qv = np.array(qv).astype("float32")
 
-    scores, idx = index.search(qv, k)
+    scores, idx = index.search(qv, 1)
+    return idx[0][0]
+
+# =========================
+# NEIGHBORS (GRAPH)
+# =========================
+def neighbors(url, topk=5):
+    if url not in graph:
+        return []
+
+    links = graph[url].get("links", [])
+    return links[:topk]
+
+# =========================
+# SCORE NODE
+# =========================
+def node_score(url):
+    if url not in graph:
+        return 0
+    return len(graph[url].get("links", [])) * 0.1
+
+# =========================
+# BUILD PATH (NUEVO CORE)
+# =========================
+def build_paths(start_url, depth=2):
+    paths = []
+
+    def dfs(node, path, d):
+        if d == 0:
+            paths.append(path)
+            return
+
+        next_nodes = neighbors(node)
+
+        if not next_nodes:
+            paths.append(path)
+            return
+
+        for n in next_nodes:
+            if n in path:
+                continue
+            dfs(n, path + [n], d-1)
+
+    dfs(start_url, [start_url], depth)
+
+    return paths
+
+# =========================
+# SCORE PATH
+# =========================
+def score_path(path):
+    score = 0
+
+    for i, url in enumerate(path):
+        score += node_score(url) * (1 / (i + 1))
+
+    return score
+
+# =========================
+# SEARCH (PATH-BASED)
+# =========================
+def search(query):
+    entry_idx = get_entry(query)
+    entry_url = data[entry_idx]["url"]
+
+    paths = build_paths(entry_url, depth=2)
+
+    scored = []
+
+    for p in paths:
+        s = score_path(p)
+
+        last = p[-1]
+
+        scored.append({
+            "path": p,
+            "final": last,
+            "score": s
+        })
+
+    scored = sorted(scored, key=lambda x: x["score"], reverse=True)
 
     results = []
 
-    for i in idx[0]:
-        if i == -1:
-            continue
+    for p in scored[:10]:
+        u = p["final"]
 
-        d = data[i]
-        url = d["url"]
+        # buscar metadata si existe
+        meta = next((d for d in data if d["url"] == u), None)
 
-        update_graph(url)
+        if meta:
+            results.append({
+                "title": meta["title"],
+                "url": u,
+                "desc": meta["text"][:140],
+                "type": classify(u),
+                "score": p["score"]
+            })
 
-        semantic = float(scores[0][list(idx[0]).index(i)])
-
-        final = semantic + graph_score(url)
-
-        results.append({
-            "title": d["title"],
-            "url": url,
-            "desc": d["text"][:160],
-            "type": classify(url),
-            "score": final
-        })
-
-    return sorted(results, key=lambda x: x["score"], reverse=True)
+    return {
+        "entry": entry_url,
+        "paths": scored[:5],
+        "results": results
+    }
 
 # =========================
 # UI
@@ -157,24 +170,28 @@ HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>Aletheia v31</title>
+<title>Aletheia v32</title>
 <style>
 body{background:#0f0f12;color:white;font-family:Arial}
 input{width:60%;padding:14px;margin:20px}
+.path{color:#888;font-size:12px;margin:10px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;padding:10px}
 .card{background:#1c1c22;padding:12px;border-radius:14px;cursor:pointer}
-.small{color:#888;font-size:12px}
 </style>
 </head>
 <body>
 
 <input id="q" placeholder="Buscar..." />
+<div id="p"></div>
 <div id="r"></div>
 
 <script>
 async function go(q){
     const r = await fetch("/api?q="+encodeURIComponent(q));
     const d = await r.json();
+
+    document.getElementById("p").innerText =
+        "ENTRY: " + d.entry;
 
     let box=document.getElementById("r");
     box.innerHTML="";
@@ -188,7 +205,7 @@ async function go(q){
 
         c.innerHTML =
             "<b>"+x.title+"</b><br>"+
-            "<span class='small'>"+x.type+"</span><br><br>"+
+            "<small>"+x.type+"</small><br><br>"+
             x.desc;
 
         c.onclick=()=>window.open(x.url);
@@ -218,9 +235,9 @@ def home():
 @app.route("/api")
 def api():
     q = request.args.get("q","")
-    return jsonify({"results": search(q)})
+    return jsonify(search(q))
 
 # =========================
 if __name__ == "__main__":
-    print("Aletheia v31 KNOWLEDGE GRAPH ONLINE")
+    print("Aletheia v32 INTENT NAVIGATION ENGINE ONLINE")
     app.run(host="0.0.0.0", port=8080)
