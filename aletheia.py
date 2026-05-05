@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import requests
 import numpy as np
 from flask import Flask, request, jsonify, render_template_string
@@ -10,13 +11,14 @@ from bs4 import BeautifulSoup
 # CONFIG
 # =========================
 INDEX_FILE = "data/index.json"
+CACHE_FILE = "data/cache.json"
 USERS_FILE = "data/users.json"
 
 app = Flask(__name__)
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # =========================
-# JSON HELPERS
+# IO
 # =========================
 def load_json(path, default):
     if not os.path.exists(path):
@@ -30,18 +32,30 @@ def save_json(path, data):
         json.dump(data, f, indent=2)
 
 # =========================
+# CACHE
+# =========================
+def load_cache():
+    return load_json(CACHE_FILE, {})
+
+def get_cached(url, cache):
+    return cache.get(url)
+
+def set_cache(url, data, cache):
+    cache[url] = data
+    save_json(CACHE_FILE, cache)
+
+# =========================
 # USERS
 # =========================
 def get_user(user_id):
     users = load_json(USERS_FILE, {})
     if user_id not in users:
         users[user_id] = {"clicks": {}}
-        save_json(USERS_FILE, users)
     return users[user_id], users
 
-def update_user(user_id, user, all_users):
-    all_users[user_id] = user
-    save_json(USERS_FILE, all_users)
+def save_user(user_id, user, users):
+    users[user_id] = user
+    save_json(USERS_FILE, users)
 
 # =========================
 # INDEX
@@ -50,7 +64,7 @@ def load_index():
     return load_json(INDEX_FILE, [])
 
 # =========================
-# EMBEDDINGS
+# EMBEDDING
 # =========================
 def embed(text):
     v = model.encode([text])[0]
@@ -62,26 +76,13 @@ def cosine(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
 
 # =========================
-# INTENCIÓN
+# PREVIEW (con cache)
 # =========================
-def intent(query):
-    q = query.lower()
+def fetch_preview(url, cache):
+    cached = get_cached(url, cache)
+    if cached:
+        return cached
 
-    if any(x in q for x in ["imagen", "fotos", "ver"]):
-        return "visual"
-
-    if any(x in q for x in ["comprar", "precio", "amazon"]):
-        return "shopping"
-
-    if any(x in q for x in ["github", "chatgpt", "google"]):
-        return "redirect"
-
-    return "search"
-
-# =========================
-# METADATA WEB (preview real)
-# =========================
-def get_preview(url):
     try:
         r = requests.get(url, timeout=4)
         soup = BeautifulSoup(r.text, "html.parser")
@@ -101,26 +102,33 @@ def get_preview(url):
         if not img:
             img = f"https://www.google.com/s2/favicons?sz=128&domain={url}"
 
-        return {
+        data = {
             "title": title,
             "desc": desc[:140],
-            "image": img
+            "img": img
         }
 
+        set_cache(url, data, cache)
+        return data
+
     except:
-        return {
+        data = {
             "title": url,
             "desc": "",
-            "image": f"https://www.google.com/s2/favicons?sz=128&domain={url}"
+            "img": f"https://www.google.com/s2/favicons?sz=128&domain={url}"
         }
+        set_cache(url, data, cache)
+        return data
 
 # =========================
 # SEARCH
 # =========================
 def search(query, user):
     index = load_index()
+    cache = load_cache()
 
     q = embed(query)
+
     results = []
 
     for item in index:
@@ -132,14 +140,14 @@ def search(query, user):
         clicks = user["clicks"].get(item["url"], 0)
         score += clicks * 0.05
 
-        preview = get_preview(item["url"])
+        preview = fetch_preview(item["url"], cache)
 
         results.append({
             "url": item["url"],
             "score": score,
             "title": preview["title"],
             "desc": preview["desc"] or item.get("text", "")[:120],
-            "image": preview["image"]
+            "img": preview["img"]
         })
 
     results.sort(key=lambda x: x["score"], reverse=True)
@@ -153,7 +161,7 @@ HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>Aletheia v11</title>
+<title>Aletheia v12</title>
 
 <style>
 body {
@@ -196,7 +204,7 @@ input {
     background:#2a2a33;
 }
 
-.img {
+.card img {
     width:100%;
     height:140px;
     object-fit:cover;
@@ -208,12 +216,12 @@ input {
 
 .title {
     font-weight:bold;
-    margin-bottom:6px;
 }
 
 .desc {
     font-size:12px;
     opacity:0.75;
+    margin-top:6px;
 }
 </style>
 
@@ -241,7 +249,7 @@ async function search(q){
         c.className = "card";
 
         c.innerHTML = `
-            <img class="img" src="${x.image}">
+            <img src="${x.img}">
             <div class="content">
                 <div class="title">${x.title}</div>
                 <div class="desc">${x.desc}</div>
@@ -279,12 +287,7 @@ def search_route():
     q = request.args.get("q", "")
     user_id = request.args.get("user", "default")
 
-    user, all_users = get_user(user_id)
-
-    mode = intent(q)
-
-    if mode == "redirect":
-        return jsonify({"mode": "redirect"})
+    user, users = get_user(user_id)
 
     return jsonify({
         "results": search(q, user)
@@ -295,10 +298,10 @@ def click():
     user_id = request.args.get("user", "default")
     url = request.args.get("url")
 
-    user, all_users = get_user(user_id)
+    user, users = get_user(user_id)
 
     user["clicks"][url] = user["clicks"].get(url, 0) + 1
-    update_user(user_id, user, all_users)
+    save_user(user_id, user, users)
 
     return jsonify({"ok": True})
 
@@ -306,5 +309,5 @@ def click():
 # START
 # =========================
 if __name__ == "__main__":
-    print("Aletheia v11 VISUAL+PREVIEW ONLINE")
+    print("Aletheia v12 CACHE+FAST ONLINE")
     app.run(host="0.0.0.0", port=8080)
