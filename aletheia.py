@@ -4,7 +4,6 @@ import requests
 from bs4 import BeautifulSoup
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from collections import defaultdict
 import json
 import os
 import hashlib
@@ -22,7 +21,6 @@ _ = model.encode(["warmup"])
 # PERSISTENCIA
 # -----------------------------
 INDEX_FILE = "index.json"
-MAX_INDEX = 500  # límite duro para no romper Railway
 
 
 def load_index():
@@ -37,19 +35,23 @@ def save_index():
         json.dump(INDEX, f)
 
 
-# -----------------------------
-# ESTADO
-# -----------------------------
 INDEX = load_index()
-LINK_GRAPH = defaultdict(set)
-PAGE_SCORE = defaultdict(float)
-VISITED_HASHES = set()
 
 
-def hash_url(url):
-    return hashlib.md5(url.encode()).hexdigest()
+# -----------------------------
+# LINK GRAPH (para PageRank)
+# -----------------------------
+GRAPH = {}
+PAGERANK = {}
 
 
+def hash_url(u):
+    return hashlib.md5(u.encode()).hexdigest()
+
+
+# -----------------------------
+# REBUILD EMBEDDINGS
+# -----------------------------
 def rebuild_embeddings():
     for item in INDEX:
         if "emb" not in item:
@@ -57,33 +59,6 @@ def rebuild_embeddings():
 
 
 rebuild_embeddings()
-
-
-# -----------------------------
-# HOME
-# -----------------------------
-@app.route("/")
-def home():
-    return """
-    <html>
-    <body style="font-family:Arial;text-align:center;margin-top:60px;">
-        <h1>Aletheia Stable</h1>
-
-        <form action="/search">
-            <input name="q" style="padding:10px;width:60%;" placeholder="Buscar...">
-            <button>Buscar</button>
-        </form>
-
-        <br><br>
-
-        <form action="/crawl">
-            <input name="url" style="padding:10px;width:60%;" placeholder="URL inicial">
-            <button>Crawl seguro</button>
-        </form>
-
-    </body>
-    </html>
-    """
 
 
 # -----------------------------
@@ -104,34 +79,31 @@ def extract(url):
                 links.append(link)
 
         return title, text, links
-
     except:
         return None, None, []
 
 
 # -----------------------------
-# CRAWLER CONTROLADO
+# CRAWLER
 # -----------------------------
 @app.route("/crawl")
 def crawl():
-    start_url = request.args.get("url", "").strip()
-    if not start_url:
+    start = request.args.get("url", "")
+    if not start:
         return "URL vacía"
 
-    queue = [(start_url, 0)]
+    visited = set()
+    queue = [(start, 0)]
     MAX_DEPTH = 1
 
-    while queue and len(INDEX) < MAX_INDEX:
+    while queue:
         url, depth = queue.pop(0)
-
         if depth > MAX_DEPTH:
             continue
-
-        h = hash_url(url)
-        if h in VISITED_HASHES:
+        if url in visited:
             continue
 
-        VISITED_HASHES.add(h)
+        visited.add(url)
 
         title, text, links = extract(url)
         if not text:
@@ -146,16 +118,41 @@ def crawl():
             "emb": emb
         })
 
-        PAGE_SCORE[url] += 1
+        GRAPH[url] = links[:5]
 
-        # limitar branching (IMPORTANTE)
         for l in links[:5]:
-            LINK_GRAPH[url].add(l)
             queue.append((l, depth + 1))
 
+    compute_pagerank()
     save_index()
 
-    return f"Indexadas: {len(INDEX)} páginas (máx {MAX_INDEX})"
+    return f"Indexadas: {len(INDEX)} páginas"
+
+
+# -----------------------------
+# PAGE RANK (ITERATIVO)
+# -----------------------------
+def compute_pagerank(iterations=10, d=0.85):
+    global PAGERANK
+
+    nodes = set(GRAPH.keys())
+
+    for n in nodes:
+        PAGERANK[n] = 1.0 / len(nodes) if nodes else 1
+
+    for _ in range(iterations):
+        new_rank = {}
+
+        for node in nodes:
+            rank_sum = 0.0
+
+            for src, outs in GRAPH.items():
+                if node in outs:
+                    rank_sum += PAGERANK.get(src, 0) / max(len(outs), 1)
+
+            new_rank[node] = (1 - d) + d * rank_sum
+
+        PAGERANK = new_rank
 
 
 # -----------------------------
@@ -170,9 +167,9 @@ def cosine(a, b):
 # -----------------------------
 @app.route("/search")
 def search():
-    q = request.args.get("q", "").strip()
+    q = request.args.get("q", "")
     if not q:
-        return home()
+        return "vacío"
 
     q_emb = model.encode([q])[0]
 
@@ -181,7 +178,9 @@ def search():
     for item in INDEX:
         sim = cosine(q_emb, item["emb"])
 
-        score = (sim * 10) + (PAGE_SCORE[item["url"]] * 0.3)
+        pr = PAGERANK.get(item["url"], 0.5)
+
+        score = (sim * 10) + (pr * 2)
 
         if score > 2:
             results.append({
@@ -192,12 +191,7 @@ def search():
 
     results.sort(key=lambda x: x["score"], reverse=True)
 
-    html = f"""
-    <html>
-    <body style="font-family:Arial;margin:40px;">
-        <h2>Resultados: {q}</h2>
-        <hr>
-    """
+    html = "<html><body style='font-family:Arial;margin:40px;'><h2>Resultados</h2><hr>"
 
     for r in results:
         html += f"""
@@ -209,13 +203,35 @@ def search():
         </div>
         """
 
-    html += """
-        <br><a href="/">← Volver</a>
+    html += "</body></html>"
+    return html
+
+
+# -----------------------------
+# HOME
+# -----------------------------
+@app.route("/")
+def home():
+    return """
+    <html>
+    <body style="font-family:Arial;text-align:center;margin-top:60px;">
+        <h1>Aletheia PageRank</h1>
+
+        <form action="/search">
+            <input name="q" style="padding:10px;width:60%;">
+            <button>Buscar</button>
+        </form>
+
+        <br>
+
+        <form action="/crawl">
+            <input name="url" style="padding:10px;width:60%;">
+            <button>Crawl</button>
+        </form>
+
     </body>
     </html>
     """
-
-    return html
 
 
 if __name__ == "__main__":
