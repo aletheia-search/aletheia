@@ -1,4 +1,4 @@
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import urllib.parse
 import numpy as np
 import json
@@ -11,13 +11,11 @@ app = Flask(__name__)
 # MODELO IA
 # -----------------------------
 model = SentenceTransformer("all-MiniLM-L6-v2")
-
-# warmup (evita lag inicial)
 _ = model.encode(["warmup"])
 
 
 # -----------------------------
-# CLICK MEMORY PERSISTENTE
+# CLICK MEMORY
 # -----------------------------
 CLICK_FILE = "clicks.json"
 
@@ -35,23 +33,22 @@ CLICK_MEMORY = load_clicks()
 
 
 # -----------------------------
-# CORPUS BASE
+# CORPUS (MISMO QUE BUSCADOR)
 # -----------------------------
 CORPUS = [
-    ("python programacion tutorial codigo lenguaje", "https://www.python.org", "Lenguaje de programación Python"),
-    ("ordenador pc lento rendimiento mejorar velocidad", "https://www.google.com/search?q=optimizar+pc", "Mejorar rendimiento del ordenador"),
-    ("internet wifi conexion router red problemas", "https://www.google.com/search?q=wifi+problemas", "Problemas de red"),
-    ("comprar amazon tienda productos precio oferta", "https://www.amazon.es", "Compras online"),
-    ("youtube video musica streaming tutorial", "https://www.youtube.com", "Plataforma de vídeo"),
-    ("wikipedia enciclopedia definicion que es", "https://es.wikipedia.org", "Enciclopedia libre")
+    "python programacion tutorial codigo lenguaje",
+    "ordenador pc lento rendimiento mejorar velocidad",
+    "internet wifi conexion router red problemas",
+    "comprar amazon tienda productos precio oferta",
+    "youtube video musica streaming tutorial",
+    "wikipedia enciclopedia definicion que es",
+    "github repositorio codigo proyectos",
+    "linux comandos terminal sistema operativo",
+    "windows errores soluciones sistema",
+    "inteligencia artificial machine learning ia"
 ]
 
-
-# -----------------------------
-# EMBEDDINGS PRECALCULADOS
-# -----------------------------
-TEXTS = [c[0] for c in CORPUS]
-EMBEDDINGS = model.encode(TEXTS, convert_to_numpy=True)
+EMBEDDINGS = model.encode(CORPUS, convert_to_numpy=True)
 
 
 # -----------------------------
@@ -63,18 +60,39 @@ def home():
     <html>
     <body style="font-family:Arial;text-align:center;margin-top:60px;">
         <h1>Aletheia</h1>
-        <form action="/search">
-            <input name="q" style="padding:10px;width:80%;" placeholder="Buscar...">
-            <br><br>
-            <button>Buscar</button>
-        </form>
+
+        <input id="q" style="padding:10px;width:60%;" placeholder="Buscar..." oninput="sug()">
+        <button onclick="go()">Buscar</button>
+
+        <div id="sug" style="margin-top:20px;color:gray;"></div>
+
+        <script>
+        async function sug(){
+            let q = document.getElementById("q").value;
+            let r = await fetch("/suggest?q=" + q);
+            let data = await r.json();
+
+            document.getElementById("sug").innerHTML =
+                data.map(x => "<div onclick='select(\""+x+"\")'>"+x+"</div>").join("");
+        }
+
+        function select(t){
+            document.getElementById("q").value = t;
+        }
+
+        function go(){
+            let q = document.getElementById("q").value;
+            window.location = "/search?q=" + encodeURIComponent(q);
+        }
+        </script>
+
     </body>
     </html>
     """
 
 
 # -----------------------------
-# CLICK TRACKING
+# CLICK TRACK
 # -----------------------------
 @app.route("/go")
 def go():
@@ -84,13 +102,6 @@ def go():
         save_clicks()
         return f'<script>window.open("{url}", "_blank"); window.location="/";</script>'
     return home()
-
-
-# -----------------------------
-# COSENO
-# -----------------------------
-def cosine(a, b):
-    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
 # -----------------------------
@@ -107,66 +118,43 @@ def search():
 
     results = []
 
-    def boost(url):
-        return CLICK_MEMORY.get(url, 0) * 0.5
-
     def add(title, link, snippet, score):
         results.append({
             "title": title,
-            "link": f"/go?url={urllib.parse.quote(link, safe='')}",
+            "link": link,
             "snippet": snippet,
             "score": score
         })
 
-    # -----------------------------
-    # MATCH SEMÁNTICO
-    # -----------------------------
-    for i, (text, link, snippet) in enumerate(CORPUS):
-        sim = cosine(q_emb, EMBEDDINGS[i])
+    for i, text in enumerate(CORPUS):
+        sim = float(np.dot(q_emb, EMBEDDINGS[i]) /
+                    (np.linalg.norm(q_emb) * np.linalg.norm(EMBEDDINGS[i])))
 
-        if sim > 0.30:
+        if sim > 0.3:
             add(
                 text.split()[0].title(),
-                link,
-                snippet,
-                sim * 10 + boost(link)
+                "https://www.google.com/search?q=" + urllib.parse.quote(text),
+                "Resultado semántico",
+                sim * 10
             )
 
-    # -----------------------------
-    # FALLBACK
-    # -----------------------------
     if not results:
-        add(
-            "Google",
-            f"https://www.google.com/search?q={encoded}",
-            "Búsqueda general.",
-            1
-        )
+        add("Google", "https://www.google.com/search?q=" + encoded, "Búsqueda general", 1)
 
-    # -----------------------------
-    # ORDER
-    # -----------------------------
     results.sort(key=lambda x: x["score"], reverse=True)
 
-    # -----------------------------
-    # HTML
-    # -----------------------------
     html = f"""
     <html>
     <body style="font-family:Arial;margin:40px;">
-        <h2>Resultados para: {q}</h2>
+        <h2>Resultados</h2>
         <hr>
     """
 
     for r in results:
         html += f"""
         <div style="margin:20px 0;">
-            <a href="{r['link']}" style="font-size:18px;">
-                {r['title']}
-            </a>
-            <div style="font-size:13px;color:gray;">
-                {r['snippet']} (score: {round(r['score'],2)})
-            </div>
+            <a href="{r['link']}" style="font-size:18px;">{r['title']}</a>
+            <div style="color:gray;font-size:13px;">{r['snippet']}</div>
         </div>
         """
 
@@ -177,6 +165,32 @@ def search():
     """
 
     return html
+
+
+# -----------------------------
+# SUGGEST ENGINE
+# -----------------------------
+@app.route("/suggest")
+def suggest():
+    q = request.args.get("q", "").strip().lower()
+    if not q:
+        return jsonify([])
+
+    q_emb = model.encode([q], convert_to_numpy=True)[0]
+
+    scored = []
+
+    for text in CORPUS:
+        emb = model.encode([text], convert_to_numpy=True)[0]
+
+        sim = float(np.dot(q_emb, emb) /
+                    (np.linalg.norm(q_emb) * np.linalg.norm(emb)))
+
+        scored.append((text, sim))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    return jsonify([x[0] for x in scored[:5]])
 
 
 if __name__ == "__main__":
