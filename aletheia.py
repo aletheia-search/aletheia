@@ -1,104 +1,91 @@
+from flask import Flask, request
+import urllib.parse
+
+app = Flask(__name__)
+
+
+# -----------------------------
+# HOME
+# -----------------------------
+@app.route("/")
+def home():
+    return """
+    <html>
+    <body style="font-family:Arial;text-align:center;margin-top:60px;">
+        <h1>Aletheia</h1>
+        <form action="/search">
+            <input name="q" style="padding:10px;width:80%;" placeholder="Buscar...">
+            <br><br>
+            <button>Buscar</button>
+        </form>
+    </body>
+    </html>
+    """
+
+
+# -----------------------------
+# SEARCH
+# -----------------------------
 @app.route("/search")
 def search():
     q = request.args.get("q", "").strip()
     if not q:
         return home()
 
-    import urllib.parse
     encoded = urllib.parse.quote(q)
     ql = q.lower()
 
     results = []
 
-    # -----------------------------
-    # REESCRITURA DE CONSULTA
-    # -----------------------------
-    def rewrite(query):
-        q = query.lower()
+    STOPWORDS = {"el", "la", "de", "mi", "no", "que", "como", "por", "un", "una", "es", "va"}
 
-        rules = [
-            (["pc lento", "ordenador lento", "va lento"], "optimizar rendimiento ordenador"),
-            (["internet no funciona", "sin internet", "wifi no va"], "solucionar problemas internet"),
-            (["como", "cómo", "tutorial"], "guía explicativa"),
-            (["arreglar", "solucionar"], "solución problema"),
-            (["python"], "python programación tutorial"),
-            (["comprar"], "mejores ofertas comprar"),
-        ]
+    def normalize(text):
+        return [w for w in text.lower().split() if w not in STOPWORDS]
 
-        for keys, replacement in rules:
-            if any(k in q for k in keys):
-                return replacement
+    def similarity(a, b):
+        a_set = set(normalize(a))
+        b_set = set(normalize(b))
+        if not a_set or not b_set:
+            return 0
+        return len(a_set & b_set) / len(a_set | b_set)
 
-        return query
-
-    rq = rewrite(q)
-    rq_encoded = urllib.parse.quote(rq)
-
-    # -----------------------------
-    # INTENCIÓN SIMPLE
-    # -----------------------------
-    def intent(query):
-        if any(x in query for x in ["cómo", "como", "tutorial", "guía"]):
-            return "educational"
-        if any(x in query for x in ["comprar", "ofertas"]):
-            return "commercial"
-        if any(x in query for x in ["qué es", "que es"]):
-            return "informational"
-        return "general"
-
-    t = intent(ql)
-
-    # -----------------------------
-    # BUILDER
-    # -----------------------------
     def add(title, link, snippet, score):
         results.append({
             "title": title,
-            "link": f"/go?url={urllib.parse.quote(link, safe='')}",
+            "link": link,
             "snippet": snippet,
             "score": score
         })
 
     # -----------------------------
-    # RESULTADOS BASADOS EN CONSULTA REESCRITA
+    # CONCEPTOS BASE
     # -----------------------------
+    concepts = [
+        ("ordenador lento pc rendimiento", "https://www.google.com/search?q=optimizar+pc", "Mejorar rendimiento del ordenador"),
+        ("internet wifi conexion red", "https://www.google.com/search?q=problemas+wifi", "Solucionar problemas de red"),
+        ("python programacion codigo tutorial", "https://www.python.org", "Lenguaje de programación Python"),
+        ("comprar precio amazon tienda ofertas", "https://www.amazon.es", "Tienda online de productos"),
+        ("youtube video musica tutorial", "https://www.youtube.com", "Plataforma de vídeos"),
+        ("wikipedia que es definicion", "https://es.wikipedia.org", "Enciclopedia libre"),
+    ]
 
-    if t == "educational":
-        add(
-            "YouTube tutorial",
-            f"https://www.youtube.com/results?search_query={rq_encoded}",
-            f"Aprende sobre: {rq}",
-            4
-        )
-        add(
-            "Google cursos",
-            f"https://www.google.com/search?q={rq_encoded}+curso",
-            "Recursos educativos.",
-            2
-        )
+    # -----------------------------
+    # MATCH SEMÁNTICO
+    # -----------------------------
+    for keywords, link, snippet in concepts:
+        sim = similarity(ql, keywords)
+        if sim > 0.15:
+            add(keywords.split()[0].title(), link, snippet, sim * 10)
 
-    elif t == "commercial":
-        add(
-            "Amazon",
-            f"https://www.amazon.es/s?k={rq_encoded}",
-            f"Resultados para: {rq}",
-            4
-        )
-
-    elif t == "informational":
-        add(
-            "Wikipedia",
-            f"https://es.wikipedia.org/wiki/Special:Search?search={rq_encoded}",
-            f"Información sobre: {rq}",
-            4
-        )
-
-    else:
+    # -----------------------------
+    # FALLBACK
+    # -----------------------------
+    if not results:
         add(
             "Google",
-            f"https://www.google.com/search?q={rq_encoded}",
-            f"Búsqueda: {rq}",
-            2
+            f"https://www.google.com/search?q={encoded}",
+            "Búsqueda general en la web.",
+            1
         )
 
     # -----------------------------
@@ -113,7 +100,6 @@ def search():
     <html>
     <body style="font-family:Arial;margin:40px;">
         <h2>Resultados para: {q}</h2>
-        <p style="color:gray;">Consulta reinterpretada: {rq}</p>
         <hr>
     """
 
@@ -124,7 +110,7 @@ def search():
                 {r['title']}
             </a>
             <div style="font-size:13px;color:gray;">
-                {r['snippet']}
+                {r['snippet']} (score: {round(r['score'],2)})
             </div>
         </div>
         """
@@ -136,3 +122,7 @@ def search():
     """
 
     return html
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
