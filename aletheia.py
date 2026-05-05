@@ -10,14 +10,17 @@ import time
 import threading
 import queue
 import urllib.parse
-import heapq
 
 app = Flask(__name__)
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
+# -----------------------------
+# CONFIG PRODUCCIÓN
+# -----------------------------
 INDEX_FILE = "index.json"
-MAX_INDEX = 800
+MAX_INDEX = 1000
+MAX_LINKS_PER_PAGE = 2
 
 START_TIME = time.time()
 
@@ -26,10 +29,24 @@ VISITED = set()
 CACHE = {}
 EMB_CACHE = {}
 
-crawl_queue = []
+# 🔥 SEMILLAS CONTROLADAS (CLAVE FINAL)
+SEEDS = [
+    "https://en.wikipedia.org",
+    "https://www.bbc.com",
+    "https://www.wikipedia.org"
+]
+
+crawl_queue = queue.Queue()
 
 # -----------------------------
-# LOAD
+# INIT SEEDS
+# -----------------------------
+def init_seeds():
+    for s in SEEDS:
+        crawl_queue.put(s)
+
+# -----------------------------
+# LOAD INDEX
 # -----------------------------
 def load_index():
     global INDEX
@@ -42,6 +59,7 @@ def save_index():
         json.dump(INDEX, f)
 
 load_index()
+init_seeds()
 
 # -----------------------------
 # EMBEDDINGS
@@ -61,7 +79,7 @@ def cosine(a, b):
     return float(np.dot(a, b))
 
 # -----------------------------
-# QUALITY CHECK FINAL (CLAVE)
+# VALIDACIÓN
 # -----------------------------
 def valid(text):
     if not text:
@@ -73,11 +91,12 @@ def valid(text):
     return True
 
 # -----------------------------
-# EXTRACTOR ROBUSTO
+# EXTRACT
 # -----------------------------
 def extract(url):
     try:
-        r = requests.get(url, timeout=4)
+        r = requests.get(url, timeout=5)
+
         if r.status_code != 200:
             return None, None, None, 0
 
@@ -85,8 +104,7 @@ def extract(url):
 
         title = soup.title.text if soup.title else url
 
-        paragraphs = [p.text for p in soup.find_all("p")]
-        text = " ".join(paragraphs)
+        text = " ".join([p.text for p in soup.find_all("p")])
 
         if not valid(text):
             return None, None, None, 0
@@ -101,21 +119,17 @@ def extract(url):
 
         quality = min(len(text) / 1200, 2.0)
 
-        return title, text, links, quality
+        return title, text, links[:MAX_LINKS_PER_PAGE], quality
 
     except:
         return None, None, None, 0
 
 # -----------------------------
-# CRAWLER SIMPLE
+# CRAWLER CONTROLADO
 # -----------------------------
 def crawler():
     while True:
-        if not crawl_queue:
-            time.sleep(0.2)
-            continue
-
-        url = crawl_queue.pop(0)
+        url = crawl_queue.get()
 
         if url in VISITED or len(INDEX) >= MAX_INDEX:
             continue
@@ -136,14 +150,14 @@ def crawler():
 
         save_index()
 
-        for l in links[:2]:
+        for l in links:
             if l not in VISITED:
-                crawl_queue.append(l)
+                crawl_queue.put(l)
 
 threading.Thread(target=crawler, daemon=True).start()
 
 # -----------------------------
-# SEARCH SAFE
+# SEARCH
 # -----------------------------
 def search_engine(q):
     if q in CACHE:
@@ -154,9 +168,6 @@ def search_engine(q):
     results = []
 
     for item in INDEX:
-        if not item.get("text"):
-            continue
-
         sim = cosine(q_emb, item["emb"])
         score = sim * item["quality"]
 
@@ -174,7 +185,7 @@ def search_engine(q):
     return CACHE[q]
 
 # -----------------------------
-# RENDER FIABLE
+# UI
 # -----------------------------
 def render(results):
     html = """
@@ -188,20 +199,13 @@ def render(results):
         html += "<p>No results found</p>"
 
     for r in results:
-        try:
-            domain = r["url"].split("/")[2]
-        except:
-            domain = "unknown"
-
-        snippet = r.get("text", "")
-        if not snippet:
-            continue
+        domain = r["url"].split("/")[2] if "://" in r["url"] else r["url"]
 
         html += f"""
         <div style="margin-bottom:20px;">
             <a href="{r['url']}" target="_blank">{r['title']}</a>
             <div style="font-size:12px;color:gray;">{domain}</div>
-            <div style="font-size:13px;color:#444;">{snippet[:140]}</div>
+            <div style="font-size:13px;color:#444;">{r['text'][:140]}</div>
         </div>
         """
 
@@ -225,7 +229,7 @@ def crawl():
     if not url:
         return "No URL"
 
-    crawl_queue.append(url)
+    crawl_queue.put(url)
     return f"Queued: {url}"
 
 @app.route("/health")
@@ -234,7 +238,7 @@ def health():
         "status": "ok",
         "uptime": int(time.time() - START_TIME),
         "index": len(INDEX),
-        "queue": len(crawl_queue),
+        "queue": crawl_queue.qsize(),
         "cache": len(CACHE)
     }
 
@@ -253,11 +257,11 @@ def home():
         <br>
 
         <form action="/crawl">
-            <input name="url" placeholder="Index URL">
+            <input name="url" placeholder="Seed URL">
             <button>Crawl</button>
         </form>
 
-        <p>Stable output + safe rendering</p>
+        <p>Controlled production crawler + semantic search</p>
     </body>
     </html>
     """
