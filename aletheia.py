@@ -14,7 +14,7 @@ import urllib.parse
 app = Flask(__name__)
 
 # -----------------------------
-# MODELO IA
+# IA
 # -----------------------------
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
@@ -34,7 +34,7 @@ EMB_CACHE = {}
 crawl_queue = queue.Queue()
 
 # -----------------------------
-# LOAD INDEX
+# LOAD
 # -----------------------------
 def load_index():
     global INDEX
@@ -66,7 +66,7 @@ def cosine(a, b):
     return float(np.dot(a, b))
 
 # -----------------------------
-# EXTRACTOR
+# EXTRACTOR + QUALITY SCORE
 # -----------------------------
 def extract(url):
     try:
@@ -74,14 +74,18 @@ def extract(url):
         soup = BeautifulSoup(r.text, "html.parser")
 
         title = soup.title.text if soup.title else url
+
         paragraphs = [p.text for p in soup.find_all("p")]
         text = " ".join(paragraphs)
 
-        # filtro de calidad básico
-        if len(text) < 200:
-            return None, None, []
+        # 🔥 FILTRO MÁS IMPORTANTE
+        if len(text) < 250:
+            return None, None, None
 
-        text = text[:1500]
+        text = text[:2000]
+
+        # calidad del documento
+        quality_score = min(len(text) / 1000, 2.0)
 
         links = []
         for a in soup.find_all("a", href=True):
@@ -89,9 +93,10 @@ def extract(url):
             if l.startswith("http"):
                 links.append(l)
 
-        return title, text, links
+        return title, text, links, quality_score
+
     except:
-        return None, None, []
+        return None, None, None, None
 
 # -----------------------------
 # CRAWLER
@@ -103,7 +108,7 @@ def crawler():
         if url in VISITED or len(INDEX) >= MAX_INDEX:
             continue
 
-        title, text, links = extract(url)
+        title, text, links, quality = extract(url)
         if not text:
             continue
 
@@ -113,7 +118,8 @@ def crawler():
             "url": url,
             "title": title,
             "text": text,
-            "emb": embed(text)
+            "emb": embed(text),
+            "quality": quality
         })
 
         save_index()
@@ -136,9 +142,12 @@ def search_engine(q):
     results = []
 
     for item in INDEX:
-        score = cosine(q_emb, item["emb"])
+        sim = cosine(q_emb, item["emb"])
 
-        if score > 0.25:
+        # 🔥 ranking mejorado con calidad
+        score = sim * item.get("quality", 1.0)
+
+        if score > 0.2:
             results.append({
                 "title": item["title"],
                 "url": item["url"],
@@ -229,7 +238,7 @@ def home():
             <button>Crawl</button>
         </form>
 
-        <p>Simple semantic search engine</p>
+        <p>Search engine with quality ranking</p>
     </body>
     </html>
     """
