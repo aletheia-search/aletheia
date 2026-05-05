@@ -1,6 +1,65 @@
+from flask import Flask, request
+import urllib.parse
+import requests
+from bs4 import BeautifulSoup
+
+app = Flask(__name__)
+
+
+# -----------------------------
+# HOME
+# -----------------------------
+@app.route("/")
+def home():
+    return """
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Aletheia</title>
+    </head>
+
+    <body style="font-family:Arial;text-align:center;margin-top:60px;">
+        <h1>Aletheia</h1>
+
+        <form action="/search">
+            <input name="q" placeholder="Buscar..." style="padding:10px;width:80%;">
+            <br><br>
+            <button>Buscar</button>
+        </form>
+    </body>
+    </html>
+    """
+
+
+# -----------------------------
+# WIKIPEDIA SCRAPER SIMPLE
+# -----------------------------
+def wiki_snippet(query):
+    try:
+        url = f"https://es.wikipedia.org/wiki/{query.replace(' ', '_')}"
+        r = requests.get(url, timeout=3)
+
+        if r.status_code != 200:
+            return None
+
+        soup = BeautifulSoup(r.text, "html.parser")
+        p = soup.find("p")
+
+        if p:
+            return p.text.strip()[:300]
+
+    except:
+        pass
+
+    return None
+
+
+# -----------------------------
+# SEARCH
+# -----------------------------
 @app.route("/search")
 def search():
-    q = request.args.get("q", "").strip().lower()
+    q = request.args.get("q", "").strip()
     if not q:
         return home()
 
@@ -8,68 +67,79 @@ def search():
 
     results = []
 
-    def add(title, link, score):
-        results.append({"title": title, "link": link, "score": score})
+    def add(title, link, snippet, score):
+        results.append({
+            "title": title,
+            "link": link,
+            "snippet": snippet,
+            "score": score
+        })
 
     # -----------------------------
-    # EXPANSIÓN DE CONSULTA
+    # INTENCIONES
     # -----------------------------
-    def expand(query):
-        variations = [query]
+    ql = q.lower()
 
-        if "python" in query:
-            variations += [
-                "python tutorial",
-                "aprender python",
-                "python curso",
-                "python básico",
-                "python rápido"
-            ]
+    if "wikipedia" in ql or "que es" in ql:
+        snippet = wiki_snippet(q) or "Definición en Wikipedia."
+        add(
+            "Wikipedia",
+            f"https://es.wikipedia.org/wiki/Special:Search?search={encoded}",
+            snippet,
+            3
+        )
 
-        if "youtube" in query:
-            variations += [query.replace("youtube", "").strip()]
+    if "python" in ql:
+        snippet = wiki_snippet("Python (lenguaje de programación)") or \
+                   "Lenguaje de programación interpretado y de alto nivel."
+        add(
+            "Python",
+            "https://www.python.org",
+            snippet,
+            3
+        )
+        add(
+            "Python YouTube",
+            f"https://www.youtube.com/results?search_query=python+tutorial",
+            "Vídeos para aprender Python paso a paso.",
+            2
+        )
 
-        if "comprar" in query:
-            variations += ["amazon " + query]
+    if "youtube" in ql:
+        add(
+            "YouTube",
+            f"https://www.youtube.com/results?search_query={encoded}",
+            "Plataforma de vídeos.",
+            2
+        )
 
-        if "que es" in query:
-            variations += ["definición " + query]
+    if "amazon" in ql or "comprar" in ql:
+        add(
+            "Amazon",
+            f"https://www.amazon.es/s?k={encoded}",
+            "Tienda online de productos.",
+            3
+        )
 
-        return list(set(variations))
-
-    queries = expand(q)
-
-    # -----------------------------
-    # GENERACIÓN DE RESULTADOS
-    # -----------------------------
-    for item in queries:
-
-        enc = urllib.parse.quote(item)
-
-        if "python" in item:
-            add("Python oficial", "https://www.python.org", 3)
-
-        if "tutorial" in item:
-            add("Python tutorial YouTube", f"https://www.youtube.com/results?search_query={enc}", 3)
-
-        if "curso" in item:
-            add("Curso Python YouTube", f"https://www.youtube.com/results?search_query={enc}", 3)
-
-        if "youtube" in item:
-            add("YouTube", f"https://www.youtube.com/results?search_query={enc}", 2)
-
-        if "wikipedia" in item or "que es" in item:
-            add("Wikipedia ES", f"https://es.wikipedia.org/wiki/Special:Search?search={enc}", 3)
-
-        if "amazon" in item or "comprar" in item:
-            add("Amazon", f"https://www.amazon.es/s?k={enc}", 3)
+    if "noticias" in ql:
+        add(
+            "Google News",
+            f"https://www.google.com/search?q={encoded}",
+            "Noticias recientes en la web.",
+            2
+        )
 
     # fallback
     if not results:
-        add("Google", f"https://www.google.com/search?q={encoded}", 1)
+        add(
+            "Google",
+            f"https://www.google.com/search?q={encoded}",
+            "Búsqueda general.",
+            1
+        )
 
     # -----------------------------
-    # RANKING
+    # ORDENAR
     # -----------------------------
     results.sort(key=lambda x: x["score"], reverse=True)
 
@@ -90,10 +160,13 @@ def search():
 
     for r in results:
         html += f"""
-        <div style="margin:20px 0;">
+        <div style="margin:25px 0;">
             <a href="{r['link']}" target="_blank" style="font-size:18px;">
                 {r['title']}
             </a>
+            <div style="font-size:13px;color:gray;margin-top:5px;">
+                {r['snippet']}
+            </div>
         </div>
         """
 
@@ -105,3 +178,7 @@ def search():
     """
 
     return html
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
