@@ -28,13 +28,13 @@ START_TIME = time.time()
 
 INDEX = []
 VISITED = set()
-EMB_CACHE = {}
 CACHE = {}
+EMB_CACHE = {}
 
 crawl_queue = queue.Queue()
 
 # -----------------------------
-# LOAD
+# LOAD INDEX
 # -----------------------------
 def load_index():
     global INDEX
@@ -49,17 +49,14 @@ def save_index():
 load_index()
 
 # -----------------------------
-# EMBEDDINGS NORMALIZADOS
+# EMBEDDINGS
 # -----------------------------
 def embed(text):
     h = hashlib.md5(text.encode()).hexdigest()
-
     if h in EMB_CACHE:
         return EMB_CACHE[h]
 
     v = model.encode([text])[0]
-
-    # 🔥 normalización (CLAVE PARA RANKING ESTABLE)
     v = v / (np.linalg.norm(v) + 1e-9)
 
     EMB_CACHE[h] = v
@@ -77,7 +74,14 @@ def extract(url):
         soup = BeautifulSoup(r.text, "html.parser")
 
         title = soup.title.text if soup.title else url
-        text = " ".join([p.text for p in soup.find_all("p")])[:1500]
+        paragraphs = [p.text for p in soup.find_all("p")]
+        text = " ".join(paragraphs)
+
+        # filtro de calidad básico
+        if len(text) < 200:
+            return None, None, []
+
+        text = text[:1500]
 
         links = []
         for a in soup.find_all("a", href=True):
@@ -121,7 +125,7 @@ def crawler():
 threading.Thread(target=crawler, daemon=True).start()
 
 # -----------------------------
-# SEARCH CACHEADA
+# SEARCH ENGINE
 # -----------------------------
 def search_engine(q):
     if q in CACHE:
@@ -134,7 +138,7 @@ def search_engine(q):
     for item in INDEX:
         score = cosine(q_emb, item["emb"])
 
-        if score > 0.25:  # 🔥 umbral más estable
+        if score > 0.25:
             results.append({
                 "title": item["title"],
                 "url": item["url"],
@@ -144,8 +148,7 @@ def search_engine(q):
 
     results.sort(key=lambda x: x["score"], reverse=True)
 
-    CACHE[q] = results[:10]  # cache limitada
-
+    CACHE[q] = results[:10]
     return CACHE[q]
 
 # -----------------------------
@@ -160,7 +163,7 @@ def render(results):
     """
 
     if not results:
-        html += "<p>No results</p>"
+        html += "<p>No results found</p>"
 
     for r in results:
         domain = r["url"].split("/")[2] if "://" in r["url"] else r["url"]
@@ -177,7 +180,7 @@ def render(results):
     return html
 
 # -----------------------------
-# SEARCH ROUTE
+# ROUTES
 # -----------------------------
 @app.route("/search")
 def search():
@@ -188,9 +191,6 @@ def search():
     results = search_engine(q)
     return render(results)
 
-# -----------------------------
-# CRAWL
-# -----------------------------
 @app.route("/crawl")
 def crawl():
     url = request.args.get("url", "")
@@ -200,9 +200,6 @@ def crawl():
     crawl_queue.put(url)
     return f"Queued: {url}"
 
-# -----------------------------
-# HEALTH
-# -----------------------------
 @app.route("/health")
 def health():
     return {
@@ -210,18 +207,15 @@ def health():
         "uptime": int(time.time() - START_TIME),
         "index": len(INDEX),
         "queue": crawl_queue.qsize(),
-        "cache_queries": len(CACHE)
+        "cache": len(CACHE)
     }
 
-# -----------------------------
-# HOME
-# -----------------------------
 @app.route("/")
 def home():
     return """
     <html>
     <body style="font-family:Arial;text-align:center;margin-top:80px;">
-        <h1>Aletheia v43</h1>
+        <h1>Aletheia</h1>
 
         <form action="/search">
             <input name="q" placeholder="Search">
@@ -235,7 +229,7 @@ def home():
             <button>Crawl</button>
         </form>
 
-        <p>Stable ranking + normalized embeddings + cache</p>
+        <p>Simple semantic search engine</p>
     </body>
     </html>
     """
