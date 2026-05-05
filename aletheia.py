@@ -1,18 +1,14 @@
 import json
-import requests
-from bs4 import BeautifulSoup
 import numpy as np
 from flask import Flask, request, jsonify
 from sentence_transformers import SentenceTransformer
-import threading
-import time
 import os
+from collections import Counter
 
 # =========================
 # CONFIG
 # =========================
 INDEX_FILE = "store/index.json"
-MEMORY_FILE = "store/memory.json"
 
 app = Flask(__name__)
 model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -20,16 +16,15 @@ model = SentenceTransformer("all-MiniLM-L6-v2")
 # =========================
 # LOAD DATA
 # =========================
-def load_json(path):
+def load_data():
     try:
-        return json.load(open(path, "r", encoding="utf-8"))
+        return json.load(open(INDEX_FILE, "r", encoding="utf-8"))
     except:
         return []
 
-data = load_json(INDEX_FILE)
-memory = load_json(MEMORY_FILE)
+data = load_data()
 
-def save_index():
+def save_data():
     os.makedirs("store", exist_ok=True)
     with open(INDEX_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f)
@@ -37,131 +32,109 @@ def save_index():
 # =========================
 # EMBEDDINGS
 # =========================
-def rebuild_embeddings():
+def embeddings():
     texts = [d["text"] for d in data]
+    if not texts:
+        return np.array([])
     return model.encode(texts, normalize_embeddings=True)
 
-embs = rebuild_embeddings()
+embs = embeddings()
 
 # =========================
-# GAP DETECTOR (NUEVO CORE)
+# TOPIC EXTRACTION (SIMPLIFIED)
 # =========================
-def detect_gaps():
-    scores = {}
-
-    for m in memory:
-        q = m["query"]
-
-        scores[q] = scores.get(q, 0) + 1
-
-    gaps = sorted(scores.items(), key=lambda x: x[1])
-
-    return [g[0] for g in gaps[:5]]
+def topic(url):
+    if "github" in url:
+        return "dev"
+    if "amazon" in url:
+        return "shop"
+    if "wikipedia" in url:
+        return "info"
+    return "web"
 
 # =========================
-# QUERY GENERATOR (NUEVO)
+# ENTROPY (NUEVO CORE)
 # =========================
-def generate_queries():
-    gaps = detect_gaps()
+def entropy():
+    topics = [topic(d["url"]) for d in data]
 
-    generated = []
+    if not topics:
+        return 0
 
-    for g in gaps:
-        if "python" in g:
-            generated.append(g + " advanced tutorial")
-        elif "api" in g:
-            generated.append(g + " best practices")
-        else:
-            generated.append(g + " explanation")
+    counts = Counter(topics)
 
-    return generated
+    total = len(topics)
 
-# =========================
-# CRAWLER (NUEVO CORE)
-# =========================
-def crawl(url):
-    try:
-        r = requests.get(url, timeout=5)
+    probs = [c / total for c in counts.values()]
 
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        text = " ".join([p.text for p in soup.find_all("p")])
-
-        if len(text) < 200:
-            return None
-
-        title = soup.title.text if soup.title else url
-
-        return {
-            "url": url,
-            "title": title,
-            "text": text[:3000]
-        }
-
-    except:
-        return None
+    return -sum(p * np.log(p + 1e-9) for p in probs)
 
 # =========================
-# AUTO INGESTION (NUEVO)
+# BALANCE SCORE (NUEVO)
 # =========================
-def ingest(item):
-    data.append(item)
+def imbalance_penalty():
+    topics = [topic(d["url"]) for d in data]
 
-    global embs
-    embs = rebuild_embeddings()
+    counts = Counter(topics)
 
-    save_index()
+    if not counts:
+        return 0
 
-# =========================
-# AUTONOMOUS LOOP (NUEVO CORE)
-# =========================
-def autonomous_loop():
-    while True:
-        queries = generate_queries()
+    max_topic = max(counts.values())
+    total = sum(counts.values())
 
-        for q in queries:
-            # simulación de búsqueda externa
-            url = "https://example.com/" + q.replace(" ", "_")
-
-            item = crawl(url)
-
-            if item:
-                ingest(item)
-
-        time.sleep(30)
+    return max_topic / total
 
 # =========================
-# SEARCH (SIMPLIFICADO)
+# DRIFT CONTROL (NUEVO CORE)
 # =========================
-def search(query):
+def stability_factor():
+    ent = entropy()
+    imbalance = imbalance_penalty()
+
+    return (ent * 0.6) + ((1 - imbalance) * 0.4)
+
+# =========================
+# ADJUST SCORES (NUEVO)
+# =========================
+def score(query, emb, text, url):
     q_emb = model.encode([query], normalize_embeddings=True)[0]
 
-    scores = np.dot(embs, q_emb)
+    semantic = np.dot(emb, q_emb)
 
-    idx = np.argsort(-scores)[:10]
+    stability = stability_factor()
+
+    return semantic * stability
+
+# =========================
+# SEARCH
+# =========================
+def search(query):
+    global embs
+    embs = embeddings()
 
     results = []
 
-    for i in idx:
+    for i, emb in enumerate(embs):
         d = data[i]
+
+        s = score(query, emb, d["text"], d["url"])
 
         results.append({
             "title": d.get("title",""),
             "url": d["url"],
             "desc": d["text"][:140],
-            "score": float(scores[i])
+            "score": float(s),
+            "stability": stability_factor()
         })
 
-    return {
-        "results": results,
-        "auto_crawl_active": True,
-        "knowledge_size": len(data)
-    }
+    results.sort(key=lambda x: x["score"], reverse=True)
 
-# =========================
-# START AUTONOMOUS THREAD
-# =========================
-threading.Thread(target=autonomous_loop, daemon=True).start()
+    return {
+        "entropy": entropy(),
+        "stability": stability_factor(),
+        "results": results[:10]
+    }
 
 # =========================
 @app.route("/api")
@@ -169,13 +142,12 @@ def api():
     q = request.args.get("q","")
     return jsonify(search(q))
 
-# =========================
 @app.route("/")
 def home():
     return """
     <html>
     <body style="background:#111;color:white;font-family:Arial">
-    <h2>Aletheia v41</h2>
+    <h3>Aletheia v43</h3>
     <input id="q" style="padding:10px;width:60%">
     <div id="r"></div>
 
@@ -186,11 +158,13 @@ def home():
         let d=await r.json();
 
         let box=document.getElementById("r");
-        box.innerHTML="";
+        box.innerHTML =
+            "ENTROPY: "+d.entropy+"<br>"+
+            "STABILITY: "+d.stability+"<br><br>";
 
         d.results.forEach(x=>{
             let div=document.createElement("div");
-            div.innerHTML="<b>"+x.title+"</b><br>"+x.desc;
+            div.innerHTML="<b>"+x.title+"</b><br>"+x.desc+"<hr>";
             box.appendChild(div);
         });
     }
@@ -205,5 +179,5 @@ def home():
 
 # =========================
 if __name__ == "__main__":
-    print("Aletheia v41 AUTONOMOUS CRAWLER ONLINE")
+    print("Aletheia v43 COGNITIVE STABILITY ENGINE ONLINE")
     app.run(host="0.0.0.0", port=8080)
