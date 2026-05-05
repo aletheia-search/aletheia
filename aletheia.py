@@ -1,4 +1,4 @@
-from flask import Flask, request
+from flask import Flask, request, make_response
 import urllib.parse
 import requests
 from bs4 import BeautifulSoup
@@ -7,6 +7,7 @@ from sentence_transformers import SentenceTransformer
 import json
 import os
 import time
+import hashlib
 
 app = Flask(__name__)
 
@@ -17,17 +18,9 @@ model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 # -----------------------------
-# CACHE SIMPLE
-# -----------------------------
-SEARCH_CACHE = {}
-
-
-# -----------------------------
-# PERSISTENCIA
+# PERSISTENCIA GLOBAL
 # -----------------------------
 INDEX_FILE = "index.json"
-QUEUE_FILE = "queue.json"
-
 MAX_INDEX = 800
 
 
@@ -44,11 +37,10 @@ def save_json(path, data):
 
 
 INDEX = load_json(INDEX_FILE, [])
-QUEUE = load_json(QUEUE_FILE, [])
 
 
 # -----------------------------
-# EMBEDDINGS CACHE
+# EMBEDDING CACHE
 # -----------------------------
 EMB_CACHE = {}
 
@@ -61,11 +53,27 @@ def embed(text):
     return v
 
 
-# -----------------------------
-# COSENO
-# -----------------------------
 def cosine(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+
+# -----------------------------
+# USER ID (sin login)
+# -----------------------------
+def get_user_id():
+    uid = request.cookies.get("uid")
+    if not uid:
+        uid = hashlib.md5(str(time.time()).encode()).hexdigest()
+    return uid
+
+
+USER_MEMORY = {}
+
+
+def get_user_memory(uid):
+    if uid not in USER_MEMORY:
+        USER_MEMORY[uid] = {"clicks": {}}
+    return USER_MEMORY[uid]
 
 
 # -----------------------------
@@ -85,41 +93,27 @@ def extract(url):
 
 
 # -----------------------------
-# SEARCH HÍBRIDO FINAL
+# SEARCH MULTIUSUARIO
 # -----------------------------
 @app.route("/search")
 def search():
-    q = request.args.get("q", "").strip()
+    q = request.args.get("q", "")
+    uid = get_user_id()
+    mem = get_user_memory(uid)
+
     if not q:
         return home()
 
-    if q in SEARCH_CACHE:
-        return SEARCH_CACHE[q]
-
     q_emb = embed(q)
-    now = time.time()
 
     results = []
 
     for item in INDEX:
         sim = cosine(q_emb, item["emb"])
 
-        # -----------------------------
-        # FACTORES DE RANKING
-        # -----------------------------
+        clicks = mem["clicks"].get(item["url"], 0)
 
-        # relevancia semántica
-        semantic = sim * 10
-
-        # frescura (contenido más reciente)
-        age = now - item.get("timestamp", now)
-        freshness = max(0, 5 - (age / 86400))  # penaliza días viejos
-
-        # clicks (si existen)
-        clicks = item.get("clicks", 0)
-
-        # score final híbrido
-        score = semantic + (freshness * 0.5) + (clicks * 0.3)
+        score = (sim * 10) + (clicks * 0.5)
 
         if score > 2:
             results.append({
@@ -135,7 +129,7 @@ def search():
     for r in results:
         html += f"""
         <div style="margin:20px 0;">
-            <a href="{r['url']}" target="_blank" style="font-size:18px;">
+            <a href="/go?url={urllib.parse.quote(r['url'])}" style="font-size:18px;">
                 {r['title']}
             </a>
             <div style="color:gray;">score: {round(r['score'],2)}</div>
@@ -144,21 +138,40 @@ def search():
 
     html += "</body></html>"
 
-    SEARCH_CACHE[q] = html
-    return html
+    resp = make_response(html)
+    resp.set_cookie("uid", uid)
+    return resp
 
 
 # -----------------------------
-# CRAWL (mínimo, estable)
+# CLICK TRACKING POR USUARIO
+# -----------------------------
+@app.route("/go")
+def go():
+    url = request.args.get("url")
+    uid = get_user_id()
+    mem = get_user_memory(uid)
+
+    if url:
+        mem["clicks"][url] = mem["clicks"].get(url, 0) + 1
+
+        resp = make_response(
+            f'<script>window.open("{url}", "_blank"); window.location="/";</script>'
+        )
+        resp.set_cookie("uid", uid)
+        return resp
+
+    return home()
+
+
+# -----------------------------
+# CRAWL SIMPLE
 # -----------------------------
 @app.route("/crawl")
 def crawl():
-    url = request.args.get("url", "").strip()
-    if not url:
-        return "URL vacía"
-
-    if len(INDEX) >= MAX_INDEX:
-        return "Índice lleno"
+    url = request.args.get("url", "")
+    if not url or len(INDEX) >= MAX_INDEX:
+        return "Error o límite alcanzado"
 
     title, text = extract(url)
     if not text:
@@ -168,9 +181,7 @@ def crawl():
         "url": url,
         "title": title,
         "text": text,
-        "emb": embed(text),
-        "timestamp": time.time(),
-        "clicks": 0
+        "emb": embed(text)
     })
 
     save_json(INDEX_FILE, INDEX)
@@ -179,14 +190,14 @@ def crawl():
 
 
 # -----------------------------
-# HOME FINAL
+# HOME
 # -----------------------------
 @app.route("/")
 def home():
     return """
     <html>
     <body style="font-family:Arial;text-align:center;margin-top:60px;">
-        <h1>Aletheia v29</h1>
+        <h1>Aletheia v30</h1>
 
         <form action="/search">
             <input name="q" style="padding:10px;width:60%;">
@@ -200,7 +211,7 @@ def home():
             <button>Indexar URL</button>
         </form>
 
-        <p>Motor híbrido IA + enlaces + frescura + clicks</p>
+        <p>Sistema multiusuario sin login + ranking personalizado</p>
     </body>
     </html>
     """
