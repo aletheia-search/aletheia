@@ -4,6 +4,7 @@ import requests
 from bs4 import BeautifulSoup
 import numpy as np
 from sentence_transformers import SentenceTransformer
+from collections import defaultdict
 
 app = Flask(__name__)
 
@@ -15,9 +16,11 @@ _ = model.encode(["warmup"])
 
 
 # -----------------------------
-# ÍNDICE EN MEMORIA
+# ÍNDICE GLOBAL
 # -----------------------------
-INDEX = []  # {title, url, text, embedding}
+INDEX = []
+LINK_GRAPH = defaultdict(set)
+PAGE_SCORE = defaultdict(float)
 
 
 # -----------------------------
@@ -28,7 +31,7 @@ def home():
     return """
     <html>
     <body style="font-family:Arial;text-align:center;margin-top:60px;">
-        <h1>Aletheia Crawler</h1>
+        <h1>Aletheia Crawler v2</h1>
 
         <form action="/search">
             <input name="q" style="padding:10px;width:60%;" placeholder="Buscar...">
@@ -38,8 +41,8 @@ def home():
         <br><br>
 
         <form action="/crawl">
-            <input name="url" style="padding:10px;width:60%;" placeholder="URL a indexar">
-            <button>Indexar</button>
+            <input name="url" style="padding:10px;width:60%;" placeholder="URL inicial">
+            <button>Indexar (2 niveles)</button>
         </form>
 
     </body>
@@ -48,15 +51,9 @@ def home():
 
 
 # -----------------------------
-# CRAWLER SIMPLE
+# EXTRACCIÓN
 # -----------------------------
-@app.route("/crawl")
-def crawl():
-    url = request.args.get("url", "").strip()
-
-    if not url:
-        return "URL vacía"
-
+def extract(url):
     try:
         r = requests.get(url, timeout=5)
         soup = BeautifulSoup(r.text, "html.parser")
@@ -64,23 +61,68 @@ def crawl():
         title = soup.title.text if soup.title else url
         text = " ".join([p.text for p in soup.find_all("p")])[:2000]
 
+        links = []
+        for a in soup.find_all("a", href=True):
+            link = urllib.parse.urljoin(url, a["href"])
+            if link.startswith("http"):
+                links.append(link)
+
+        return title, text, links
+    except:
+        return None, None, []
+
+
+# -----------------------------
+# CRAWLER MULTINIVEL
+# -----------------------------
+@app.route("/crawl")
+def crawl():
+    start_url = request.args.get("url", "").strip()
+    if not start_url:
+        return "URL vacía"
+
+    visited = set()
+
+    def crawl_level(url, depth):
+        if depth > 1 or url in visited:
+            return
+
+        visited.add(url)
+
+        title, text, links = extract(url)
+        if not text:
+            return
+
         emb = model.encode([text])[0]
 
         INDEX.append({
-            "title": title,
             "url": url,
+            "title": title,
             "text": text,
             "emb": emb
         })
 
-        return f"Indexado: {title}"
+        PAGE_SCORE[url] += 1  # base score
 
-    except Exception as e:
-        return f"Error: {str(e)}"
+        for l in links[:10]:  # limitamos explosión
+            LINK_GRAPH[url].add(l)
+            PAGE_SCORE[l] += 0.5
+            crawl_level(l, depth + 1)
+
+    crawl_level(start_url, 0)
+
+    return f"Indexadas páginas: {len(INDEX)}"
 
 
 # -----------------------------
-# SEARCH SEMÁNTICO EN ÍNDICE
+# SIMILITUD
+# -----------------------------
+def cosine(a, b):
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+
+# -----------------------------
+# SEARCH
 # -----------------------------
 @app.route("/search")
 def search():
@@ -93,16 +135,16 @@ def search():
     results = []
 
     for item in INDEX:
-        sim = float(
-            np.dot(q_emb, item["emb"]) /
-            (np.linalg.norm(q_emb) * np.linalg.norm(item["emb"]))
-        )
+        sim = cosine(q_emb, item["emb"])
 
-        if sim > 0.35:
+        # híbrido: semántica + importancia tipo PageRank simple
+        score = (sim * 10) + (PAGE_SCORE[item["url"]] * 0.5)
+
+        if score > 2:
             results.append({
                 "title": item["title"],
                 "url": item["url"],
-                "score": sim
+                "score": score
             })
 
     results.sort(key=lambda x: x["score"], reverse=True)
@@ -110,7 +152,7 @@ def search():
     html = f"""
     <html>
     <body style="font-family:Arial;margin:40px;">
-        <h2>Resultados para: {q}</h2>
+        <h2>Resultados: {q}</h2>
         <hr>
     """
 
