@@ -1,6 +1,7 @@
 import json
 import numpy as np
 import faiss
+import requests
 from flask import Flask, request, jsonify, render_template_string
 from sentence_transformers import SentenceTransformer
 from urllib.parse import urlparse
@@ -29,24 +30,12 @@ index = faiss.IndexFlatIP(embs.shape[1])
 index.add(embs)
 
 # =========================
-# INTENT DETECTION
+# GLOBAL POPULARITY (simple)
 # =========================
-def intent(q):
-    q = q.lower()
+global_clicks = {}
 
-    if any(x in q for x in ["comprar", "precio", "tienda", "oferta"]):
-        return "buy"
-
-    if any(x in q for x in ["ver", "video", "youtube", "stream"]):
-        return "media"
-
-    if any(x in q for x in ["github", "codigo", "repo"]):
-        return "dev"
-
-    if any(x in q for x in ["ir a", "abrir", "entrar"]):
-        return "direct"
-
-    return "info"
+def boost(url):
+    return global_clicks.get(url,0) * 0.03
 
 # =========================
 # SITE TYPE
@@ -54,22 +43,29 @@ def intent(q):
 def classify(url):
     host = urlparse(url).netloc.lower()
 
-    if "amazon" in host or "aliexpress" in host or "pccomponentes" in host:
-        return "shop"
-
     if "github" in host:
         return "dev"
-
+    if "amazon" in host or "pccomponentes" in host:
+        return "shop"
     if "youtube" in host:
         return "media"
-
     if "wikipedia" in host:
         return "info"
 
     return "web"
 
 # =========================
-# SEARCH ENGINE
+# THUMBNAIL (simple proxy)
+# =========================
+def thumb(url):
+    try:
+        host = urlparse(url).netloc
+        return f"https://www.google.com/s2/favicons?sz=128&domain={host}"
+    except:
+        return ""
+
+# =========================
+# SEARCH
 # =========================
 def search(query, k=12):
     qv = model.encode([query], normalize_embeddings=True)
@@ -85,32 +81,30 @@ def search(query, k=12):
 
         d = data[i]
 
+        url = d["url"]
+
+        score = float(scores[0][list(idx[0]).index(i)])
+        score += boost(url)
+
         results.append({
             "title": d["title"],
-            "url": d["url"],
+            "url": url,
             "desc": d["text"][:120],
-            "type": classify(d["url"]),
-            "score": float(scores[0][list(idx[0]).index(i)])
+            "type": classify(url),
+            "thumb": thumb(url),
+            "score": score
         })
+
+    results.sort(key=lambda x: x["score"], reverse=True)
 
     return results
 
 # =========================
-# GROUPING INTO CAROUSELS
+# DISCOVERY (related items)
 # =========================
-def group(results):
-    groups = {
-        "shop": [],
-        "media": [],
-        "dev": [],
-        "info": [],
-        "web": []
-    }
-
-    for r in results:
-        groups[r["type"]].append(r)
-
-    return groups
+def discover(results):
+    # mezcla ligera de resultados no top
+    return results[3:8]
 
 # =========================
 # UI
@@ -120,33 +114,45 @@ HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>Aletheia v19</title>
+<title>Aletheia v20</title>
 <style>
 body{background:#0f0f12;color:white;font-family:Arial}
 input{width:60%;padding:14px;margin:20px}
 
-.section{
-    margin:20px;
-}
-
-.row{
-    display:flex;
-    overflow-x:auto;
+.grid{
+    display:grid;
+    grid-template-columns:repeat(auto-fill,minmax(260px,1fr));
     gap:10px;
+    padding:10px;
 }
 
 .card{
-    min-width:220px;
     background:#1c1c22;
     padding:12px;
-    border-radius:12px;
+    border-radius:14px;
     cursor:pointer;
+    transition:0.2s;
 }
 
-.title{
-    font-size:18px;
-    margin-top:10px;
-    color:#ccc;
+.card:hover{
+    transform:scale(1.03);
+}
+
+img{
+    width:32px;
+    height:32px;
+    border-radius:6px;
+}
+
+.tag{
+    font-size:11px;
+    color:#aaa;
+}
+
+.section-title{
+    margin:20px 10px 5px;
+    color:#888;
+    font-size:14px;
 }
 </style>
 </head>
@@ -163,29 +169,24 @@ async function go(q){
     let box=document.getElementById("r");
     box.innerHTML="";
 
-    for (let key in d.results){
-        let section=document.createElement("div");
-        section.className="section";
+    let grid=document.createElement("div");
+    grid.className="grid";
 
-        let title=document.createElement("div");
-        title.className="title";
-        title.innerText=key.toUpperCase();
+    d.results.forEach(x=>{
+        let c=document.createElement("div");
+        c.className="card";
 
-        let row=document.createElement("div");
-        row.className="row";
+        c.innerHTML=
+            "<img src='"+x.thumb+"'><br>"+
+            "<b>"+x.title+"</b><br>"+
+            "<span class='tag'>"+x.type+"</span><br><br>"+
+            x.desc;
 
-        d.results[key].forEach(x=>{
-            let c=document.createElement("div");
-            c.className="card";
-            c.innerHTML="<b>"+x.title+"</b><br>"+x.desc;
-            c.onclick=()=>window.open(x.url);
-            row.appendChild(c);
-        });
+        c.onclick=()=>window.open(x.url);
+        grid.appendChild(c);
+    });
 
-        section.appendChild(title);
-        section.appendChild(row);
-        box.appendChild(section);
-    }
+    box.appendChild(grid);
 }
 
 document.getElementById("q").onkeydown=e=>{
@@ -198,8 +199,6 @@ document.getElementById("q").onkeydown=e=>{
 """
 
 # =========================
-# ROUTES
-# =========================
 @app.route("/")
 def home():
     return HTML
@@ -207,13 +206,17 @@ def home():
 @app.route("/search")
 def search_route():
     q = request.args.get("q","")
+    return jsonify({"results": search(q)})
 
-    raw = search(q)
-    grouped = group(raw)
+@app.route("/click")
+def click():
+    url = request.args.get("url")
 
-    return jsonify({"results": grouped})
+    global_clicks[url] = global_clicks.get(url,0) + 1
+
+    return jsonify({"ok":True})
 
 # =========================
 if __name__=="__main__":
-    print("Aletheia v19 INTENT + CAROUSEL ONLINE")
+    print("Aletheia v20 VISUAL + DISCOVERY ONLINE")
     app.run(host="0.0.0.0",port=8080)
