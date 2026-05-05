@@ -1,6 +1,6 @@
 import json
 import numpy as np
-import faiss
+import time
 from flask import Flask, request, jsonify, render_template_string
 from sentence_transformers import SentenceTransformer
 from urllib.parse import urlparse
@@ -8,8 +8,8 @@ from urllib.parse import urlparse
 # =========================
 # CONFIG
 # =========================
-INDEX_FILE = "store/index.json"
 GRAPH_FILE = "store/graph.json"
+INDEX_FILE = "store/index.json"
 
 app = Flask(__name__)
 model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -29,15 +29,8 @@ def load_index():
     except:
         return []
 
-data = load_index()
 graph = load_json(GRAPH_FILE)
-
-# =========================
-# EMBEDDINGS
-# =========================
-embs = np.array([d["emb"] for d in data]).astype("float32")
-index = faiss.IndexFlatIP(embs.shape[1])
-index.add(embs)
+data = load_index()
 
 # =========================
 # CLASSIFY
@@ -51,56 +44,96 @@ def classify(url):
     return "web"
 
 # =========================
-# ENTRY NODE
+# INIT GRAPH NODE
+# =========================
+def ensure_node(url):
+    if url not in graph:
+        graph[url] = {
+            "edges": {},
+            "score": 0,
+            "last": time.time()
+        }
+
+# =========================
+# UPDATE EDGE (NUEVO CORE)
+# =========================
+def update_edge(a, b):
+    ensure_node(a)
+    ensure_node(b)
+
+    edges = graph[a]["edges"]
+
+    edges[b] = edges.get(b, 0) + 1
+
+    graph[a]["last"] = time.time()
+
+# =========================
+# DECAY (NUEVO)
+# =========================
+def decay_graph():
+    now = time.time()
+
+    for node in list(graph.keys()):
+        age = (now - graph[node]["last"]) / 86400
+
+        # decaimiento suave
+        graph[node]["score"] *= (0.99 ** age)
+
+        # decaimiento de edges
+        for e in list(graph[node]["edges"].keys()):
+            graph[node]["edges"][e] *= 0.98
+
+            if graph[node]["edges"][e] < 0.1:
+                del graph[node]["edges"][e]
+
+# =========================
+# BUILD RELATION
+# =========================
+def relate(url, neighbors):
+    for n in neighbors:
+        update_edge(url, n)
+
+# =========================
+# GRAPH SCORE
+# =========================
+def graph_score(url):
+    if url not in graph:
+        return 0
+
+    return sum(graph[url]["edges"].values()) * 0.05
+
+# =========================
+# ENTRY PICK
 # =========================
 def get_entry(query):
     qv = model.encode([query], normalize_embeddings=True)
     qv = np.array(qv).astype("float32")
 
-    scores, idx = index.search(qv, 1)
-    return idx[0][0]
+    # simplificado: primer nodo
+    return list(graph.keys())[0] if graph else None
 
 # =========================
-# NEIGHBORS (GRAPH)
+# PATH EXPANSION
 # =========================
-def neighbors(url, topk=5):
-    if url not in graph:
-        return []
-
-    links = graph[url].get("links", [])
-    return links[:topk]
-
-# =========================
-# SCORE NODE
-# =========================
-def node_score(url):
-    if url not in graph:
-        return 0
-    return len(graph[url].get("links", [])) * 0.1
-
-# =========================
-# BUILD PATH (NUEVO CORE)
-# =========================
-def build_paths(start_url, depth=2):
+def expand(start, depth=2):
     paths = []
 
-    def dfs(node, path, d):
+    def walk(node, path, d):
         if d == 0:
             paths.append(path)
             return
 
-        next_nodes = neighbors(node)
-
-        if not next_nodes:
-            paths.append(path)
+        if node not in graph:
             return
 
-        for n in next_nodes:
+        neighbors = sorted(graph[node]["edges"].items(), key=lambda x: x[1], reverse=True)
+
+        for n, w in neighbors[:3]:
             if n in path:
                 continue
-            dfs(n, path + [n], d-1)
+            walk(n, path + [n], d-1)
 
-    dfs(start_url, [start_url], depth)
+    walk(start, [start], depth)
 
     return paths
 
@@ -108,59 +141,51 @@ def build_paths(start_url, depth=2):
 # SCORE PATH
 # =========================
 def score_path(path):
-    score = 0
-
-    for i, url in enumerate(path):
-        score += node_score(url) * (1 / (i + 1))
-
-    return score
+    return sum(graph_score(n) for n in path)
 
 # =========================
-# SEARCH (PATH-BASED)
+# SEARCH (AUTO-ORGANIZING)
 # =========================
 def search(query):
-    entry_idx = get_entry(query)
-    entry_url = data[entry_idx]["url"]
+    decay_graph()
 
-    paths = build_paths(entry_url, depth=2)
+    entry = get_entry(query)
 
-    scored = []
+    if not entry:
+        return {"results": []}
+
+    paths = expand(entry)
+
+    ranked = []
 
     for p in paths:
         s = score_path(p)
 
-        last = p[-1]
-
-        scored.append({
+        ranked.append({
             "path": p,
-            "final": last,
+            "final": p[-1],
             "score": s
         })
 
-    scored = sorted(scored, key=lambda x: x["score"], reverse=True)
+    ranked.sort(key=lambda x: x["score"], reverse=True)
 
     results = []
 
-    for p in scored[:10]:
-        u = p["final"]
+    for r in ranked[:10]:
+        url = r["final"]
 
-        # buscar metadata si existe
-        meta = next((d for d in data if d["url"] == u), None)
+        meta = next((d for d in data if d["url"] == url), None)
 
         if meta:
             results.append({
                 "title": meta["title"],
-                "url": u,
+                "url": url,
                 "desc": meta["text"][:140],
-                "type": classify(u),
-                "score": p["score"]
+                "type": classify(url),
+                "score": r["score"]
             })
 
-    return {
-        "entry": entry_url,
-        "paths": scored[:5],
-        "results": results
-    }
+    return {"results": results}
 
 # =========================
 # UI
@@ -170,11 +195,10 @@ HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>Aletheia v32</title>
+<title>Aletheia v33</title>
 <style>
 body{background:#0f0f12;color:white;font-family:Arial}
 input{width:60%;padding:14px;margin:20px}
-.path{color:#888;font-size:12px;margin:10px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;padding:10px}
 .card{background:#1c1c22;padding:12px;border-radius:14px;cursor:pointer}
 </style>
@@ -182,16 +206,12 @@ input{width:60%;padding:14px;margin:20px}
 <body>
 
 <input id="q" placeholder="Buscar..." />
-<div id="p"></div>
 <div id="r"></div>
 
 <script>
 async function go(q){
     const r = await fetch("/api?q="+encodeURIComponent(q));
     const d = await r.json();
-
-    document.getElementById("p").innerText =
-        "ENTRY: " + d.entry;
 
     let box=document.getElementById("r");
     box.innerHTML="";
@@ -239,5 +259,5 @@ def api():
 
 # =========================
 if __name__ == "__main__":
-    print("Aletheia v32 INTENT NAVIGATION ENGINE ONLINE")
+    print("Aletheia v33 SELF-ORGANIZING GRAPH ONLINE")
     app.run(host="0.0.0.0", port=8080)
