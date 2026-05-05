@@ -1,5 +1,6 @@
 import os
 import json
+import random
 import numpy as np
 from flask import Flask, request, jsonify, render_template_string
 from sentence_transformers import SentenceTransformer
@@ -14,7 +15,7 @@ app = Flask(__name__)
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # =========================
-# LINKS BASE
+# BASE LINKS
 # =========================
 QUICK_LINKS = [
     {"name": "Wikipedia", "url": "https://wikipedia.org"},
@@ -25,7 +26,7 @@ QUICK_LINKS = [
 ]
 
 # =========================
-# USAGE MEMORY
+# MEMORY (uso)
 # =========================
 def load_usage():
     if os.path.exists(USAGE_FILE):
@@ -37,7 +38,7 @@ def save_usage(data):
     with open(USAGE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f)
 
-def bump_usage(url):
+def bump(url):
     data = load_usage()
     data[url] = data.get(url, 0) + 1
     save_usage(data)
@@ -91,6 +92,7 @@ def search(query, top_k=6):
         return []
 
     q_emb = embed(query)
+
     results = []
     seen = set()
 
@@ -105,31 +107,59 @@ def search(query, top_k=6):
         except:
             continue
 
-        boost = usage.get(url, 0) * 0.02
-        final_score = score + boost
+        boost = usage.get(url, 0) * 0.03
+        final = score + boost
 
         results.append({
             "title": item.get("title", ""),
             "url": url,
             "snippet": item.get("text", "")[:160],
-            "score": final_score,
+            "score": final,
             "favicon": "https://www.google.com/s2/favicons?sz=64&domain=" + url
         })
 
-    results = [r for r in results if r["score"] > 0.28]
     results.sort(key=lambda x: x["score"], reverse=True)
-
     return results[:top_k]
+
+# =========================
+# 🔥 DISCOVERY ENGINE
+# =========================
+def discovery_feed(limit=6):
+    index = load_index()
+    usage = load_usage()
+
+    if not index:
+        return []
+
+    scored = []
+
+    for item in index:
+        url = item.get("url", "")
+        score = usage.get(url, 0)
+
+        # mezcla de uso + aleatoriedad ligera
+        score = score + random.uniform(0, 0.5)
+
+        scored.append({
+            "title": item.get("title", ""),
+            "url": url,
+            "snippet": item.get("text", "")[:140],
+            "score": score,
+            "favicon": "https://www.google.com/s2/favicons?sz=64&domain=" + url
+        })
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return scored[:limit]
 
 # =========================
 # FRONTEND
 # =========================
-HTML_PAGE = """
+HTML = """
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>Aletheia v6</title>
+<title>Aletheia v7</title>
 
 <style>
 body {
@@ -152,18 +182,20 @@ input {
     font-size: 16px;
 }
 
+.section {
+    padding: 15px 20px;
+}
+
 .grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-    gap: 15px;
-    padding: 20px;
+    gap: 12px;
 }
 
 .card {
     background: #1c1c22;
-    padding: 20px;
+    padding: 18px;
     border-radius: 12px;
-    text-align: center;
     cursor: pointer;
 }
 
@@ -171,19 +203,14 @@ input {
     background: #2a2a33;
 }
 
-.results {
-    padding: 20px;
-}
-
 .result {
-    background: #1c1c22;
-    padding: 15px;
-    border-radius: 10px;
-    margin-bottom: 10px;
-    cursor: pointer;
     display: flex;
     gap: 10px;
-    align-items: center;
+    padding: 12px;
+    background: #1c1c22;
+    border-radius: 10px;
+    margin-bottom: 8px;
+    cursor: pointer;
 }
 
 .result:hover {
@@ -194,6 +221,12 @@ img {
     width: 32px;
     height: 32px;
 }
+
+.label {
+    opacity: 0.7;
+    font-size: 12px;
+    margin-bottom: 8px;
+}
 </style>
 
 </head>
@@ -201,72 +234,105 @@ img {
 <body>
 
 <div class="topbar">
-    <input id="search" placeholder="Buscar en Aletheia..." />
+    <input id="q" placeholder="Buscar o explorar Aletheia..." />
 </div>
 
-<div id="home" class="grid"></div>
-<div id="results" class="results"></div>
+<div class="section">
+    <div class="label">Accesos rápidos</div>
+    <div id="home" class="grid"></div>
+</div>
+
+<div class="section">
+    <div class="label">Descubrir</div>
+    <div id="feed"></div>
+</div>
+
+<div class="section">
+    <div class="label">Resultados</div>
+    <div id="results"></div>
+</div>
 
 <script>
 
 async function loadHome() {
-    const res = await fetch("/home");
-    const data = await res.json();
+    const r = await fetch("/home");
+    const d = await r.json();
 
     const home = document.getElementById("home");
     home.innerHTML = "";
 
-    data.quick_links.forEach(link => {
-        const div = document.createElement("div");
-        div.className = "card";
-        div.innerText = link.name;
-        div.onclick = () => window.open(link.url, "_blank");
-        home.appendChild(div);
+    d.quick_links.forEach(x => {
+        const c = document.createElement("div");
+        c.className = "card";
+        c.innerText = x.name;
+        c.onclick = () => window.open(x.url, "_blank");
+        home.appendChild(c);
     });
 }
 
-async function search(q) {
-    const res = await fetch("/search?q=" + encodeURIComponent(q));
-    const data = await res.json();
+async function loadFeed() {
+    const r = await fetch("/feed");
+    const d = await r.json();
 
-    const home = document.getElementById("home");
-    const results = document.getElementById("results");
+    const feed = document.getElementById("feed");
+    feed.innerHTML = "";
 
-    home.style.display = "none";
-    results.innerHTML = "";
-
-    if (data.mode === "redirect") {
-        window.location.href = data.url;
-        return;
-    }
-
-    data.results.forEach(r => {
-
+    d.forEach(x => {
         const div = document.createElement("div");
         div.className = "result";
 
         div.innerHTML = `
-            <img src="${r.favicon}">
+            <img src="${x.favicon}">
             <div>
-                <div><b>${r.title}</b></div>
-                <div style="font-size:12px;opacity:0.8">${r.snippet}</div>
+                <b>${x.title}</b><br>
+                <span style="font-size:12px;opacity:0.8">${x.snippet}</span>
+            </div>
+        `;
+
+        div.onclick = () => window.open(x.url, "_blank");
+        feed.appendChild(div);
+    });
+}
+
+async function search(q) {
+    const r = await fetch("/search?q=" + encodeURIComponent(q));
+    const d = await r.json();
+
+    const results = document.getElementById("results");
+    results.innerHTML = "";
+
+    if (d.mode === "redirect") {
+        window.location.href = d.url;
+        return;
+    }
+
+    d.results.forEach(x => {
+        const div = document.createElement("div");
+        div.className = "result";
+
+        div.innerHTML = `
+            <img src="${x.favicon}">
+            <div>
+                <b>${x.title}</b><br>
+                <span style="font-size:12px;opacity:0.8">${x.snippet}</span>
             </div>
         `;
 
         div.onclick = () => {
-            fetch("/track?url=" + encodeURIComponent(r.url));
-            window.open(r.url, "_blank");
+            fetch("/track?url=" + encodeURIComponent(x.url));
+            window.open(x.url, "_blank");
         };
 
         results.appendChild(div);
     });
 }
 
-document.getElementById("search").addEventListener("keypress", function(e) {
-    if (e.key === "Enter") search(this.value);
+document.getElementById("q").addEventListener("keypress", e => {
+    if (e.key === "Enter") search(e.target.value);
 });
 
 loadHome();
+loadFeed();
 
 </script>
 
@@ -280,7 +346,7 @@ loadHome();
 
 @app.route("/")
 def ui():
-    return render_template_string(HTML_PAGE)
+    return render_template_string(HTML)
 
 @app.route("/home")
 def home():
@@ -298,27 +364,25 @@ def search_route():
     if decision["type"] == "redirect":
         return jsonify({"mode": "redirect", "url": decision["url"]})
 
-    results = search(q)
-
     return jsonify({
         "mode": "search",
-        "results": results
+        "results": search(q)
     })
+
+@app.route("/feed")
+def feed():
+    return jsonify(discovery_feed())
 
 @app.route("/track")
 def track():
     url = request.args.get("url")
     if url:
-        bump_usage(url)
+        bump(url)
     return jsonify({"ok": True})
-
-@app.route("/health")
-def health():
-    return jsonify({"status": "ok"})
 
 # =========================
 # START
 # =========================
 if __name__ == "__main__":
-    print("Aletheia v6 FULL RUNNING")
+    print("Aletheia v7 DISCOVERY ENGINE ONLINE")
     app.run(host="0.0.0.0", port=8080)
