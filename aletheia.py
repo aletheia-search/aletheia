@@ -8,6 +8,8 @@ import json
 import os
 import hashlib
 import time
+import threading
+import queue
 
 app = Flask(__name__)
 
@@ -18,19 +20,12 @@ model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 # -----------------------------
-# ARCHIVO
+# STORAGE
 # -----------------------------
 INDEX_FILE = "index.json"
-LOG_FILE = "aletheia.log"
-
 MAX_INDEX = 800
-MAX_TEXT = 1500
-REQUEST_TIMEOUT = 4
 
 
-# -----------------------------
-# LOAD/SAVE
-# -----------------------------
 def load_json(path, default):
     if os.path.exists(path):
         with open(path, "r") as f:
@@ -48,28 +43,19 @@ VISITED = set()
 
 
 # -----------------------------
-# LOGGING SIMPLE
-# -----------------------------
-def log(msg):
-    line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n"
-    with open(LOG_FILE, "a") as f:
-        f.write(line)
-
-
-# -----------------------------
 # EMBEDDINGS CACHE
 # -----------------------------
-EMB_CACHE = {}
+EMB = {}
 
 
 def embed(text):
     h = hashlib.md5(text.encode()).hexdigest()
 
-    if h in EMB_CACHE:
-        return EMB_CACHE[h]
+    if h in EMB:
+        return EMB[h]
 
     v = model.encode([text])[0]
-    EMB_CACHE[h] = v
+    EMB[h] = v
     return v
 
 
@@ -78,15 +64,18 @@ def cosine(a, b):
 
 
 # -----------------------------
-# EXTRACTOR
+# CRAWLER QUEUE (SEPARADO)
 # -----------------------------
+crawl_queue = queue.Queue()
+
+
 def extract(url):
     try:
-        r = requests.get(url, timeout=REQUEST_TIMEOUT)
+        r = requests.get(url, timeout=4)
         soup = BeautifulSoup(r.text, "html.parser")
 
         title = soup.title.text if soup.title else url
-        text = " ".join([p.text for p in soup.find_all("p")])[:MAX_TEXT]
+        text = " ".join([p.text for p in soup.find_all("p")])[:1500]
 
         links = []
         for a in soup.find_all("a", href=True):
@@ -100,7 +89,44 @@ def extract(url):
 
 
 # -----------------------------
-# SEARCH
+# CRAWLER THREAD
+# -----------------------------
+def crawler_worker():
+    global INDEX
+
+    while True:
+        url = crawl_queue.get()
+
+        if url in VISITED or len(INDEX) >= MAX_INDEX:
+            continue
+
+        title, text, links = extract(url)
+        if not text:
+            continue
+
+        VISITED.add(url)
+
+        INDEX.append({
+            "url": url,
+            "title": title,
+            "text": text,
+            "emb": embed(text)
+        })
+
+        save_json(INDEX_FILE, INDEX)
+
+        # expandir ligeramente
+        for l in links[:2]:
+            if l not in VISITED:
+                crawl_queue.put(l)
+
+
+# iniciar crawler en background
+threading.Thread(target=crawler_worker, daemon=True).start()
+
+
+# -----------------------------
+# SEARCH (RÁPIDO)
 # -----------------------------
 @app.route("/search")
 def search():
@@ -135,7 +161,7 @@ def search():
 
 
 # -----------------------------
-# CRAWL SEGURO
+# CRAWL API (NO BLOQUEANTE)
 # -----------------------------
 @app.route("/crawl")
 def crawl():
@@ -143,53 +169,9 @@ def crawl():
     if not url:
         return "URL vacía"
 
-    # evitar loops
-    if url in VISITED:
-        return "Ya indexado"
+    crawl_queue.put(url)
 
-    if len(INDEX) >= MAX_INDEX:
-        return "Límite alcanzado"
-
-    title, text, links = extract(url)
-
-    if not text:
-        return "Error"
-
-    VISITED.add(url)
-
-    INDEX.append({
-        "url": url,
-        "title": title,
-        "text": text,
-        "emb": embed(text)
-    })
-
-    # guardado seguro
-    save_json(INDEX_FILE, INDEX)
-
-    log(f"INDEXED: {url} | total={len(INDEX)}")
-
-    # crawling limitado (solo 2 links)
-    for l in links[:2]:
-        if l not in VISITED and len(INDEX) < MAX_INDEX:
-            try:
-                t, tx, _ = extract(l)
-                if tx:
-                    VISITED.add(l)
-
-                    INDEX.append({
-                        "url": l,
-                        "title": t,
-                        "text": tx,
-                        "emb": embed(tx)
-                    })
-
-            except:
-                pass
-
-    save_json(INDEX_FILE, INDEX)
-
-    return f"Indexado: {title} | Total: {len(INDEX)}"
+    return f"Añadido a cola: {url}"
 
 
 # -----------------------------
@@ -200,7 +182,7 @@ def home():
     return """
     <html>
     <body style="font-family:Arial;text-align:center;margin-top:80px;">
-        <h1>Aletheia v36</h1>
+        <h1>Aletheia v37</h1>
 
         <form action="/search">
             <input name="q" placeholder="Buscar">
@@ -211,15 +193,14 @@ def home():
 
         <form action="/crawl">
             <input name="url" placeholder="Indexar URL">
-            <button>Crawl</button>
+            <button>Añadir crawler</button>
         </form>
 
-        <p>Sistema con control de carga y seguridad básica</p>
+        <p>Arquitectura separada: web + crawler independiente</p>
     </body>
     </html>
     """
 
 
 if __name__ == "__main__":
-    log("Aletheia started")
     app.run(host="0.0.0.0", port=8080)
