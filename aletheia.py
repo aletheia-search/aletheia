@@ -7,6 +7,7 @@ from sentence_transformers import SentenceTransformer
 import json
 import os
 import hashlib
+import threading
 
 app = Flask(__name__)
 
@@ -17,10 +18,10 @@ model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 # -----------------------------
-# ARCHIVOS PERSISTENTES
+# ARCHIVOS
 # -----------------------------
 INDEX_FILE = "index.json"
-EMB_FILE = "embeddings.json"
+LOCK = threading.Lock()
 
 MAX_INDEX = 800
 
@@ -33,55 +34,34 @@ def load_json(path, default):
 
 
 def save_json(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f)
+    with LOCK:
+        with open(path, "w") as f:
+            json.dump(data, f)
 
 
 # -----------------------------
-# CARGA DE DATOS
+# DATOS
 # -----------------------------
-RAW_INDEX = load_json(INDEX_FILE, [])
-EMB_INDEX = load_json(EMB_FILE, {})
-
-INDEX = []
+INDEX = load_json(INDEX_FILE, [])
 
 
 # -----------------------------
-# EMBEDDINGS PERSISTENTES
+# EMBEDDINGS CACHE
 # -----------------------------
-def get_embedding(text):
+EMB = {}
+
+
+def embed(text):
     h = hashlib.md5(text.encode()).hexdigest()
 
-    if h in EMB_INDEX:
-        return np.array(EMB_INDEX[h])
+    if h in EMB:
+        return EMB[h]
 
     v = model.encode([text])[0]
-    EMB_INDEX[h] = v.tolist()
-
+    EMB[h] = v
     return v
 
 
-def build_index():
-    global INDEX
-    INDEX = []
-
-    for item in RAW_INDEX:
-        emb = get_embedding(item["text"])
-
-        INDEX.append({
-            "url": item["url"],
-            "title": item["title"],
-            "text": item["text"],
-            "emb": np.array(emb)
-        })
-
-
-build_index()
-
-
-# -----------------------------
-# COSENO
-# -----------------------------
 def cosine(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
@@ -140,31 +120,28 @@ def search():
 
 
 # -----------------------------
-# CRAWL PERSISTENTE
+# CRAWL SEGURO
 # -----------------------------
 @app.route("/crawl")
 def crawl():
     url = request.args.get("url", "")
-    if not url or len(RAW_INDEX) >= MAX_INDEX:
+    if not url or len(INDEX) >= MAX_INDEX:
         return "Error"
 
     title, text = extract(url)
     if not text:
         return "Error"
 
-    RAW_INDEX.append({
+    INDEX.append({
         "url": url,
         "title": title,
-        "text": text
+        "text": text,
+        "emb": embed(text)
     })
 
-    # guardar todo de forma segura
-    save_json(INDEX_FILE, RAW_INDEX)
-    save_json(EMB_FILE, EMB_INDEX)
+    save_json(INDEX_FILE, INDEX)
 
-    build_index()
-
-    return f"Indexado: {title} | Total: {len(RAW_INDEX)}"
+    return f"Indexado: {title} | Total: {len(INDEX)}"
 
 
 # -----------------------------
@@ -175,7 +152,7 @@ def home():
     return """
     <html>
     <body style="font-family:Arial;text-align:center;margin-top:80px;">
-        <h1>Aletheia v34</h1>
+        <h1>Aletheia v35</h1>
 
         <form action="/search">
             <input name="q" placeholder="Buscar">
@@ -189,7 +166,7 @@ def home():
             <button>Crawl</button>
         </form>
 
-        <p>Arquitectura estable con embeddings persistentes</p>
+        <p>Sistema estable listo para usuarios públicos</p>
     </body>
     </html>
     """
