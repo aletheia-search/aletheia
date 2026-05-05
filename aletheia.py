@@ -1,4 +1,4 @@
-from flask import Flask, request, make_response
+from flask import Flask, request
 import urllib.parse
 import requests
 from bs4 import BeautifulSoup
@@ -8,18 +8,17 @@ import json
 import os
 import time
 import hashlib
-import threading
 
 app = Flask(__name__)
 
 # -----------------------------
-# IA
+# MODELO IA (solo carga una vez)
 # -----------------------------
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 # -----------------------------
-# INDEX
+# INDEX PERSISTENTE
 # -----------------------------
 INDEX_FILE = "index.json"
 MAX_INDEX = 800
@@ -37,27 +36,40 @@ def save_json(path, data):
         json.dump(data, f)
 
 
-INDEX = load_json(INDEX_FILE, [])
+# -----------------------------
+# CARGA INDEX
+# -----------------------------
+RAW_INDEX = load_json(INDEX_FILE, [])
+
+INDEX = []  # aquí ya viene optimizado
+
 
 # -----------------------------
-# CACHE EMBEDDINGS
+# EMBEDDINGS PRECALCULADOS (CRÍTICO)
 # -----------------------------
-EMB = {}
+def build_index():
+    global INDEX
 
-def embed(t):
-    if t in EMB:
-        return EMB[t]
-    v = model.encode([t])[0]
-    EMB[t] = v
-    return v
+    INDEX = []
+    for item in RAW_INDEX:
+        if "emb" not in item:
+            item["emb"] = model.encode([item["text"]])[0]
+
+        INDEX.append(item)
 
 
+build_index()
+
+
+# -----------------------------
+# COSENO (OPTIMIZADO)
+# -----------------------------
 def cosine(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
 # -----------------------------
-# EXTRACT
+# EXTRACTOR
 # -----------------------------
 def extract(url):
     try:
@@ -73,30 +85,7 @@ def extract(url):
 
 
 # -----------------------------
-# CRAWLER ASÍNCRONO
-# -----------------------------
-def crawl_worker(url):
-    global INDEX
-
-    if len(INDEX) >= MAX_INDEX:
-        return
-
-    title, text = extract(url)
-    if not text:
-        return
-
-    INDEX.append({
-        "url": url,
-        "title": title,
-        "text": text,
-        "emb": embed(text)
-    })
-
-    save_json(INDEX_FILE, INDEX)
-
-
-# -----------------------------
-# SEARCH
+# SEARCH (ULTRA RÁPIDA)
 # -----------------------------
 @app.route("/search")
 def search():
@@ -104,17 +93,23 @@ def search():
     if not q:
         return home()
 
-    q_emb = embed(q)
+    q_emb = model.encode([q])[0]
 
     results = []
 
+    # 🔥 optimización clave: solo 1 embedding query
     for item in INDEX:
         score = cosine(q_emb, item["emb"]) * 10
 
         if score > 2:
-            results.append(item)
+            results.append({
+                "title": item["title"],
+                "url": item["url"],
+                "score": score,
+                "text": item["text"]
+            })
 
-    results.sort(key=lambda x: cosine(q_emb, x["emb"]), reverse=True)
+    results.sort(key=lambda x: x["score"], reverse=True)
 
     html = "<html><body style='font-family:Arial;margin:40px;'><h2>Resultados</h2><hr>"
 
@@ -133,19 +128,28 @@ def search():
 
 
 # -----------------------------
-# CRAWL (NO BLOQUEANTE)
+# CRAWL
 # -----------------------------
 @app.route("/crawl")
 def crawl():
     url = request.args.get("url", "")
-    if not url:
-        return "URL vacía"
+    if not url or len(RAW_INDEX) >= MAX_INDEX:
+        return "Error"
 
-    # hilo separado (IMPORTANTE para Railway)
-    thread = threading.Thread(target=crawl_worker, args=(url,))
-    thread.start()
+    title, text = extract(url)
+    if not text:
+        return "Error"
 
-    return f"Crawling en background: {url}"
+    RAW_INDEX.append({
+        "url": url,
+        "title": title,
+        "text": text
+    })
+
+    save_json(INDEX_FILE, RAW_INDEX)
+    build_index()  # reconstrucción incremental
+
+    return f"Indexado: {title} | Total: {len(RAW_INDEX)}"
 
 
 # -----------------------------
@@ -167,7 +171,7 @@ def home():
     return """
     <html>
     <body style="font-family:Arial;text-align:center;margin-top:80px;">
-        <h1>Aletheia v32</h1>
+        <h1>Aletheia v33</h1>
 
         <form action="/search">
             <input name="q" placeholder="Buscar">
@@ -178,10 +182,10 @@ def home():
 
         <form action="/crawl">
             <input name="url" placeholder="Indexar URL">
-            <button>Crawl async</button>
+            <button>Crawl</button>
         </form>
 
-        <p>Sistema estable con crawling en segundo plano</p>
+        <p>Índice optimizado para velocidad real</p>
     </body>
     </html>
     """
