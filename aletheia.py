@@ -2,10 +2,10 @@ import json
 import numpy as np
 import faiss
 import math
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, session
 from sentence_transformers import SentenceTransformer
 from urllib.parse import urlparse
-import time
+from collections import defaultdict
 
 # =========================
 # CONFIG
@@ -14,12 +14,14 @@ INDEX_FILE = "store/index.json"
 FEEDBACK_FILE = "store/feedback.json"
 
 app = Flask(__name__)
+app.secret_key = "aletheia_light_key"
+
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 AI_WEIGHT = 0.15
 
 # =========================
-# LOAD DATA
+# LOAD
 # =========================
 def load_json(path):
     try:
@@ -37,11 +39,30 @@ data = load_index()
 feedback = load_json(FEEDBACK_FILE)
 
 # =========================
-# FAISS INDEX
+# FAISS
 # =========================
 embs = np.array([d["emb"] for d in data]).astype("float32")
 index = faiss.IndexFlatIP(embs.shape[1])
 index.add(embs)
+
+# =========================
+# SESSION MEMORY
+# =========================
+def get_session_profile():
+    if "profile" not in session:
+        session["profile"] = {
+            "dev": 0,
+            "shop": 0,
+            "media": 0,
+            "info": 0,
+            "web": 0
+        }
+    return session["profile"]
+
+def update_profile(tag):
+    profile = get_session_profile()
+    profile[tag] = profile.get(tag, 0) + 1
+    session["profile"] = profile
 
 # =========================
 # FEEDBACK
@@ -55,20 +76,6 @@ def register_click(url):
     save_feedback()
 
 # =========================
-# IA (re-ranker interno simple)
-# =========================
-def ai_adjust(url, semantic_score):
-    # IA muy limitada: solo ajuste ligero
-    base = feedback.get(url, 0) * 0.02
-    return max(min(base, AI_WEIGHT), -AI_WEIGHT)
-
-# =========================
-# DECAY
-# =========================
-def decay(value, age_days):
-    return value * (0.97 ** age_days)
-
-# =========================
 # CLASSIFY
 # =========================
 def classify(url):
@@ -78,24 +85,36 @@ def classify(url):
         return "dev"
     if "youtube" in host:
         return "media"
-    if "wikipedia" in host:
-        return "info"
     if "amazon" in host or "pccomponentes" in host:
         return "shop"
+    if "wikipedia" in host:
+        return "info"
 
     return "web"
 
 # =========================
-# SCORING FINAL
+# IA ADJUST
 # =========================
-def final_score(url, semantic, clicks):
+def ai_adjust(url):
+    return feedback.get(url, 0) * 0.02
+
+# =========================
+# FINAL SCORE
+# =========================
+def final_score(url, semantic, clicks, tag):
+    profile = get_session_profile()
+
     behavior = clicks * 0.1
-    ai = ai_adjust(url, semantic)
+    ai = min(ai_adjust(url), AI_WEIGHT)
+
+    # ajuste por sesión
+    session_boost = profile.get(tag, 0) * 0.03
 
     score = (
         0.60 * semantic +
         0.25 * behavior +
-        0.15 * ai
+        0.15 * ai +
+        session_boost
     )
 
     return score * (1 + math.log(1 + clicks))
@@ -119,15 +138,18 @@ def search(query, k=12):
         url = d["url"]
 
         semantic = float(scores[0][list(idx[0]).index(i)])
+        tag = classify(url)
         clicks = feedback.get(url, 0)
 
-        score = final_score(url, semantic, clicks)
+        update_profile(tag)
+
+        score = final_score(url, semantic, clicks, tag)
 
         results.append({
             "title": d["title"],
             "url": url,
             "desc": d["text"][:160],
-            "type": classify(url),
+            "type": tag,
             "score": score
         })
 
@@ -142,7 +164,7 @@ HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>Aletheia v22</title>
+<title>Aletheia v23</title>
 <style>
 body{background:#0f0f12;color:white;font-family:Arial}
 input{width:60%;padding:14px;margin:20px}
@@ -197,8 +219,6 @@ document.getElementById("q").onkeydown=e=>{
 """
 
 # =========================
-# ROUTES
-# =========================
 @app.route("/")
 def home():
     return HTML
@@ -216,5 +236,5 @@ def click():
 
 # =========================
 if __name__ == "__main__":
-    print("Aletheia v22 ONLINE (unified scoring system)")
+    print("Aletheia v23 PERSONAL LIGHT ONLINE")
     app.run(host="0.0.0.0", port=8080)
