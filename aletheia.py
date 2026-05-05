@@ -20,26 +20,9 @@ model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 # -----------------------------
-# LIMITADOR SIMPLE
+# ESTADO DEL SISTEMA
 # -----------------------------
-REQUESTS = {}
-LIMIT = 30  # por minuto
-
-
-def allowed(ip):
-    now = time.time()
-    window = 60
-
-    if ip not in REQUESTS:
-        REQUESTS[ip] = []
-
-    REQUESTS[ip] = [t for t in REQUESTS[ip] if now - t < window]
-
-    if len(REQUESTS[ip]) >= LIMIT:
-        return False
-
-    REQUESTS[ip].append(now)
-    return True
+START_TIME = time.time()
 
 
 # -----------------------------
@@ -112,7 +95,7 @@ def extract(url):
 
 
 # -----------------------------
-# CRAWLER THREAD
+# CRAWLER
 # -----------------------------
 def crawler_worker():
     global INDEX
@@ -151,10 +134,6 @@ threading.Thread(target=crawler_worker, daemon=True).start()
 # -----------------------------
 @app.route("/search")
 def search():
-    ip = request.remote_addr
-    if not allowed(ip):
-        return "Demasiadas peticiones, espera un momento"
-
     q = request.args.get("q", "")
     if not q:
         return home()
@@ -190,10 +169,6 @@ def search():
 # -----------------------------
 @app.route("/crawl")
 def crawl():
-    ip = request.remote_addr
-    if not allowed(ip):
-        return "Demasiadas peticiones"
-
     url = request.args.get("url", "")
     if not url:
         return "URL vacía"
@@ -204,6 +179,23 @@ def crawl():
 
 
 # -----------------------------
+# HEALTH CHECK (NUEVO)
+# -----------------------------
+@app.route("/health")
+def health():
+    uptime = int(time.time() - START_TIME)
+
+    return {
+        "status": "ok",
+        "uptime_sec": uptime,
+        "index_size": len(INDEX),
+        "queue_size": crawl_queue.qsize(),
+        "visited": len(VISITED),
+        "memory_embeddings": len(EMB)
+    }
+
+
+# -----------------------------
 # HOME
 # -----------------------------
 @app.route("/")
@@ -211,7 +203,7 @@ def home():
     return """
     <html>
     <body style="font-family:Arial;text-align:center;margin-top:80px;">
-        <h1>Aletheia v38</h1>
+        <h1>Aletheia v39</h1>
 
         <form action="/search">
             <input name="q" placeholder="Buscar">
@@ -225,7 +217,7 @@ def home():
             <button>Crawl</button>
         </form>
 
-        <p>Control de carga + protección básica</p>
+        <p>Incluye monitorización del sistema (/health)</p>
     </body>
     </html>
     """
