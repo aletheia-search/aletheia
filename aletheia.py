@@ -1,18 +1,20 @@
-import requests
-import json
 import time
+import json
+import threading
+import requests
 from bs4 import BeautifulSoup
 from sentence_transformers import SentenceTransformer
 import numpy as np
 
-INDEX_FILE = "index.json"
-SEEDS = [
-    "https://en.wikipedia.org/wiki/Artificial_intelligence",
-    "https://github.com",
-    "https://www.bbc.com",
-]
+INDEX_FILE = "store/index.json"
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
+
+SEEDS = [
+    "https://en.wikipedia.org/wiki/Technology",
+    "https://github.com/explore",
+    "https://www.bbc.com/news"
+]
 
 def embed(t):
     v = model.encode([t])[0]
@@ -20,30 +22,22 @@ def embed(t):
 
 def load():
     try:
-        with open(INDEX_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        return json.load(open(INDEX_FILE,"r",encoding="utf-8"))
     except:
         return []
 
 def save(data):
-    with open(INDEX_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    json.dump(data, open(INDEX_FILE,"w",encoding="utf-8"), indent=2)
 
 def extract(url):
     try:
         r = requests.get(url, timeout=5)
-        if r.status_code != 200:
-            return None, []
-
-        soup = BeautifulSoup(r.text, "html.parser")
+        soup = BeautifulSoup(r.text,"html.parser")
 
         title = soup.title.text if soup.title else url
         text = " ".join(p.text for p in soup.find_all("p"))[:2000]
 
-        links = []
-        for a in soup.find_all("a", href=True):
-            if a["href"].startswith("http"):
-                links.append(a["href"])
+        links = [a["href"] for a in soup.find_all("a", href=True) if a["href"].startswith("http")]
 
         return {
             "url": url,
@@ -56,28 +50,29 @@ def extract(url):
     except:
         return None, []
 
-def run():
-    index = load()
-    visited = set(i["url"] for i in index)
+def loop():
+    while True:
+        index = load()
+        visited = set(i["url"] for i in index)
+        queue = SEEDS[:]
 
-    queue = SEEDS[:]
+        while queue and len(index) < 1500:
+            url = queue.pop(0)
+            if url in visited:
+                continue
 
-    while queue and len(index) < 1000:
-        url = queue.pop(0)
+            data, links = extract(url)
+            if data:
+                index.append(data)
+                visited.add(url)
+                save(index)
 
-        if url in visited:
-            continue
+                queue.extend(links)
 
-        data, links = extract(url)
-        if data:
-            index.append(data)
-            visited.add(url)
-            save(index)
+            time.sleep(0.4)
 
-            queue.extend(links)
+threading.Thread(target=loop, daemon=True).start()
 
-        time.sleep(0.5)
-
-if __name__ == "__main__":
-    print("Crawler Aletheia ON")
-    run()
+print("Crawler v15 running...")
+while True:
+    time.sleep(10)
