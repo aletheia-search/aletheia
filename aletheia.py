@@ -1,4 +1,4 @@
-from flask import Flask, request, session
+from flask import Flask, request
 import urllib.parse
 import requests
 from bs4 import BeautifulSoup
@@ -9,14 +9,18 @@ import os
 import hashlib
 
 app = Flask(__name__)
-app.secret_key = "aletheia_secret_key"
 
 # -----------------------------
-# MODELO IA
+# MODELO IA (solo una vez)
 # -----------------------------
 model = SentenceTransformer("all-MiniLM-L6-v2")
-_ = model.encode(["warmup"])
 
+
+# -----------------------------
+# CACHE GLOBAL
+# -----------------------------
+EMB_CACHE = {}
+SEARCH_CACHE = {}
 
 # -----------------------------
 # PERSISTENCIA
@@ -25,8 +29,8 @@ INDEX_FILE = "index.json"
 QUEUE_FILE = "queue.json"
 
 MAX_INDEX = 800
-MAX_CRAWL_PER_RUN = 10
 MAX_DEPTH = 2
+CRAWL_LIMIT = 10
 
 
 def load_json(path, default):
@@ -37,38 +41,39 @@ def load_json(path, default):
 
 
 def save_json(path, data):
-    with open(path, "w"):
+    with open(path, "w") as f:
         json.dump(data, f)
 
 
 INDEX = load_json(INDEX_FILE, [])
 QUEUE = load_json(QUEUE_FILE, [])
 
+
 # -----------------------------
-# SESIONES (ranking ligero por usuario)
+# EMBEDDING CON CACHE
 # -----------------------------
-if "clicks" not in session:
-    session["clicks"] = {}
+def embed(text):
+    if text in EMB_CACHE:
+        return EMB_CACHE[text]
+
+    vec = model.encode([text])[0]
+    EMB_CACHE[text] = vec
+    return vec
 
 
 # -----------------------------
 # UTIL
 # -----------------------------
+def cosine(a, b):
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+
 def hash_url(u):
     return hashlib.md5(u.encode()).hexdigest()
 
 
-def rebuild():
-    for i in INDEX:
-        if "emb" not in i:
-            i["emb"] = model.encode([i["text"]])[0]
-
-
-rebuild()
-
-
 # -----------------------------
-# EXTRACTOR
+# EXTRACT
 # -----------------------------
 def extract(url):
     try:
@@ -90,7 +95,7 @@ def extract(url):
 
 
 # -----------------------------
-# CRAWLER CONTROLADO
+# CRAWLER
 # -----------------------------
 @app.route("/crawl")
 def crawl():
@@ -103,7 +108,7 @@ def crawl():
 
     count = 0
 
-    while QUEUE and count < MAX_CRAWL_PER_RUN and len(INDEX) < MAX_INDEX:
+    while QUEUE and count < CRAWL_LIMIT and len(INDEX) < MAX_INDEX:
         item = QUEUE.pop(0)
         url = item["url"]
         depth = item["depth"]
@@ -115,7 +120,7 @@ def crawl():
         if not text:
             continue
 
-        emb = model.encode([text])[0]
+        emb = embed(text)
 
         INDEX.append({
             "url": url,
@@ -132,38 +137,30 @@ def crawl():
     save_json(INDEX_FILE, INDEX)
     save_json(QUEUE_FILE, QUEUE)
 
-    return f"Crawled {count} | Index: {len(INDEX)} | Queue: {len(QUEUE)}"
+    return f"Crawled {count} | Index {len(INDEX)} | Queue {len(QUEUE)}"
 
 
 # -----------------------------
-# COSENO
-# -----------------------------
-def cosine(a, b):
-    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
-
-
-# -----------------------------
-# SEARCH
+# SEARCH OPTIMIZADO
 # -----------------------------
 @app.route("/search")
 def search():
-    q = request.args.get("q", "")
+    q = request.args.get("q", "").strip()
     if not q:
         return home()
 
-    q_emb = model.encode([q])[0]
+    # cache de búsquedas
+    if q in SEARCH_CACHE:
+        return SEARCH_CACHE[q]
 
-    clicks = session.get("clicks", {})
+    q_emb = embed(q)
 
     results = []
 
     for item in INDEX:
         sim = cosine(q_emb, item["emb"])
 
-        # ranking híbrido final
-        link_score = clicks.get(item["url"], 0) * 0.5
-
-        score = (sim * 10) + link_score
+        score = sim * 10
 
         if score > 2:
             results.append({
@@ -174,58 +171,33 @@ def search():
 
     results.sort(key=lambda x: x["score"], reverse=True)
 
-    html = f"""
-    <html>
-    <body style="font-family:Arial;margin:40px;">
-        <h2>Resultados para: {q}</h2>
-        <hr>
-    """
+    html = "<html><body style='font-family:Arial;margin:40px;'><h2>Resultados</h2><hr>"
 
     for r in results:
         html += f"""
         <div style="margin:20px 0;">
-            <a href="/go?url={urllib.parse.quote(r['url'])}" style="font-size:18px;">
+            <a href="{r['url']}" target="_blank" style="font-size:18px;">
                 {r['title']}
             </a>
             <div style="color:gray;">score: {round(r['score'],2)}</div>
         </div>
         """
 
-    html += """
-        <br><a href="/">← Volver</a>
-    </body>
-    </html>
-    """
+    html += "</body></html>"
 
+    SEARCH_CACHE[q] = html  # guardamos cache
     return html
 
 
 # -----------------------------
-# CLICK TRACKING
-# -----------------------------
-@app.route("/go")
-def go():
-    url = request.args.get("url")
-
-    if url:
-        clicks = session.get("clicks", {})
-        clicks[url] = clicks.get(url, 0) + 1
-        session["clicks"] = clicks
-
-        return f'<script>window.open("{url}", "_blank"); window.location="/";</script>'
-
-    return home()
-
-
-# -----------------------------
-# HOME FINAL
+# HOME
 # -----------------------------
 @app.route("/")
 def home():
     return """
     <html>
     <body style="font-family:Arial;text-align:center;margin-top:60px;">
-        <h1>Aletheia v27</h1>
+        <h1>Aletheia v28</h1>
 
         <form action="/search">
             <input name="q" style="padding:10px;width:60%;">
@@ -239,7 +211,7 @@ def home():
             <button>Crawl</button>
         </form>
 
-        <p>Sistema completo: IA + crawler + ranking + sesión</p>
+        <p>Cache activo + IA optimizada</p>
     </body>
     </html>
     """
