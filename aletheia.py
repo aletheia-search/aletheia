@@ -12,17 +12,16 @@ import hashlib
 app = Flask(__name__)
 
 # -----------------------------
-# MODELO IA
+# IA
 # -----------------------------
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 # -----------------------------
-# PERSISTENCIA GLOBAL
+# INDEX
 # -----------------------------
 INDEX_FILE = "index.json"
 MAX_INDEX = 800
-
 
 def load_json(path, default):
     if os.path.exists(path):
@@ -30,50 +29,36 @@ def load_json(path, default):
             return json.load(f)
     return default
 
-
 def save_json(path, data):
     with open(path, "w") as f:
         json.dump(data, f)
 
-
 INDEX = load_json(INDEX_FILE, [])
 
-
 # -----------------------------
-# EMBEDDING CACHE
+# EMB CACHE
 # -----------------------------
-EMB_CACHE = {}
+EMB = {}
 
-
-def embed(text):
-    if text in EMB_CACHE:
-        return EMB_CACHE[text]
-    v = model.encode([text])[0]
-    EMB_CACHE[text] = v
+def embed(t):
+    if t in EMB:
+        return EMB[t]
+    v = model.encode([t])[0]
+    EMB[t] = v
     return v
-
 
 def cosine(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
 # -----------------------------
-# USER ID (sin login)
+# USER
 # -----------------------------
-def get_user_id():
-    uid = request.cookies.get("uid")
-    if not uid:
-        uid = hashlib.md5(str(time.time()).encode()).hexdigest()
-    return uid
-
-
-USER_MEMORY = {}
-
-
-def get_user_memory(uid):
-    if uid not in USER_MEMORY:
-        USER_MEMORY[uid] = {"clicks": {}}
-    return USER_MEMORY[uid]
+def uid():
+    u = request.cookies.get("uid")
+    if not u:
+        u = hashlib.md5(str(time.time()).encode()).hexdigest()
+    return u
 
 
 # -----------------------------
@@ -93,14 +78,11 @@ def extract(url):
 
 
 # -----------------------------
-# SEARCH MULTIUSUARIO
+# SEARCH (UI LIMPIA)
 # -----------------------------
 @app.route("/search")
 def search():
     q = request.args.get("q", "")
-    uid = get_user_id()
-    mem = get_user_memory(uid)
-
     if not q:
         return home()
 
@@ -110,68 +92,106 @@ def search():
 
     for item in INDEX:
         sim = cosine(q_emb, item["emb"])
-
-        clicks = mem["clicks"].get(item["url"], 0)
-
-        score = (sim * 10) + (clicks * 0.5)
+        score = sim * 10
 
         if score > 2:
-            results.append({
-                "title": item["title"],
-                "url": item["url"],
-                "score": score
-            })
+            results.append(item)
 
-    results.sort(key=lambda x: x["score"], reverse=True)
+    results.sort(key=lambda x: cosine(q_emb, x["emb"]), reverse=True)
 
-    html = "<html><body style='font-family:Arial;margin:40px;'><h2>Resultados</h2><hr>"
+    html = f"""
+    <html>
+    <head>
+        <title>Aletheia</title>
+        <style>
+            body {{
+                font-family: Arial;
+                margin: 0;
+                background: #fff;
+            }}
+            .top {{
+                text-align:center;
+                margin-top:40px;
+            }}
+            input {{
+                width: 60%;
+                padding: 12px;
+                font-size: 16px;
+            }}
+            button {{
+                padding: 12px 16px;
+                font-size: 16px;
+            }}
+            .result {{
+                margin: 20px auto;
+                width: 60%;
+                padding: 10px;
+            }}
+            a {{
+                font-size: 18px;
+                text-decoration: none;
+                color: #1a0dab;
+            }}
+            a:hover {{
+                text-decoration: underline;
+            }}
+            .snippet {{
+                color: #555;
+                font-size: 13px;
+            }}
+        </style>
+    </head>
 
-    for r in results:
+    <body>
+
+    <div class="top">
+        <h1>Aletheia</h1>
+
+        <form action="/search">
+            <input name="q" value="{q}">
+            <button>Buscar</button>
+        </form>
+    </div>
+
+    <hr>
+    """
+
+    for r in results[:10]:
         html += f"""
-        <div style="margin:20px 0;">
-            <a href="/go?url={urllib.parse.quote(r['url'])}" style="font-size:18px;">
+        <div class="result">
+            <a href="/go?url={urllib.parse.quote(r['url'])}">
                 {r['title']}
             </a>
-            <div style="color:gray;">score: {round(r['score'],2)}</div>
+            <div class="snippet">{r['text'][:120]}</div>
         </div>
         """
 
     html += "</body></html>"
 
     resp = make_response(html)
-    resp.set_cookie("uid", uid)
+    resp.set_cookie("uid", uid())
     return resp
 
 
 # -----------------------------
-# CLICK TRACKING POR USUARIO
+# CLICK TRACK
 # -----------------------------
 @app.route("/go")
 def go():
     url = request.args.get("url")
-    uid = get_user_id()
-    mem = get_user_memory(uid)
-
     if url:
-        mem["clicks"][url] = mem["clicks"].get(url, 0) + 1
-
-        resp = make_response(
-            f'<script>window.open("{url}", "_blank"); window.location="/";</script>'
-        )
-        resp.set_cookie("uid", uid)
-        return resp
-
+        return f'<script>window.open("{url}", "_blank"); window.location="/";</script>'
     return home()
 
 
 # -----------------------------
-# CRAWL SIMPLE
+# CRAWL
 # -----------------------------
 @app.route("/crawl")
 def crawl():
     url = request.args.get("url", "")
     if not url or len(INDEX) >= MAX_INDEX:
-        return "Error o límite alcanzado"
+        return "Error"
 
     title, text = extract(url)
     if not text:
@@ -186,7 +206,7 @@ def crawl():
 
     save_json(INDEX_FILE, INDEX)
 
-    return f"Indexado: {title} | Total: {len(INDEX)}"
+    return f"Indexado: {title}"
 
 
 # -----------------------------
@@ -196,22 +216,17 @@ def crawl():
 def home():
     return """
     <html>
-    <body style="font-family:Arial;text-align:center;margin-top:60px;">
-        <h1>Aletheia v30</h1>
+    <body style="font-family:Arial;text-align:center;margin-top:80px;">
+        <h1>Aletheia</h1>
 
         <form action="/search">
-            <input name="q" style="padding:10px;width:60%;">
+            <input name="q" placeholder="Buscar en Aletheia">
             <button>Buscar</button>
         </form>
 
-        <br>
-
-        <form action="/crawl">
-            <input name="url" style="padding:10px;width:60%;">
-            <button>Indexar URL</button>
-        </form>
-
-        <p>Sistema multiusuario sin login + ranking personalizado</p>
+        <p style="color:gray;margin-top:20px;">
+            Motor de búsqueda IA
+        </p>
     </body>
     </html>
     """
