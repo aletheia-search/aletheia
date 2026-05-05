@@ -10,6 +10,7 @@ import time
 import threading
 import queue
 import urllib.parse
+import heapq
 
 app = Flask(__name__)
 
@@ -25,7 +26,8 @@ VISITED = set()
 CACHE = {}
 EMB_CACHE = {}
 
-crawl_queue = queue.Queue()
+# 🔥 cola con prioridad (nuevo)
+crawl_queue = []
 
 # -----------------------------
 # LOAD
@@ -60,30 +62,20 @@ def cosine(a, b):
     return float(np.dot(a, b))
 
 # -----------------------------
-# QUALITY FILTER (CLAVE)
+# QUALITY
 # -----------------------------
-def is_valid_content(text):
+def content_score(text):
     if not text:
-        return False
+        return 0
 
-    # demasiado corto = basura
-    if len(text) < 300:
-        return False
-
-    # demasiado repetitivo
+    length_score = min(len(text) / 1200, 2.0)
     words = text.split()
-    if len(words) < 80:
-        return False
+    diversity = len(set(words)) / (len(words) + 1)
 
-    # ratio básico de contenido útil
-    unique_ratio = len(set(words)) / (len(words) + 1)
-    if unique_ratio < 0.35:
-        return False
-
-    return True
+    return length_score * diversity
 
 # -----------------------------
-# EXTRACTOR
+# EXTRACT
 # -----------------------------
 def extract(url):
     try:
@@ -91,16 +83,13 @@ def extract(url):
         soup = BeautifulSoup(r.text, "html.parser")
 
         title = soup.title.text if soup.title else url
-
         paragraphs = [p.text for p in soup.find_all("p")]
         text = " ".join(paragraphs)
 
-        if not is_valid_content(text):
-            return None, None, None, None
+        if len(text) < 300:
+            return None, None, None, 0
 
         text = text[:2000]
-
-        quality = min(len(text) / 1200, 2.0)
 
         links = []
         for a in soup.find_all("a", href=True):
@@ -108,22 +97,29 @@ def extract(url):
             if l.startswith("http"):
                 links.append(l)
 
-        return title, text, links, quality
+        return title, text, links, content_score(text)
 
     except:
-        return None, None, None, None
+        return None, None, None, 0
 
 # -----------------------------
-# CRAWLER
+# CRAWLER PRIORITARIO
 # -----------------------------
+def add_to_queue(url, priority):
+    heapq.heappush(crawl_queue, (-priority, url))  # max-heap
+
 def crawler():
     while True:
-        url = crawl_queue.get()
+        if not crawl_queue:
+            time.sleep(0.2)
+            continue
+
+        _, url = heapq.heappop(crawl_queue)
 
         if url in VISITED or len(INDEX) >= MAX_INDEX:
             continue
 
-        title, text, links, quality = extract(url)
+        title, text, links, score = extract(url)
         if not text:
             continue
 
@@ -134,14 +130,15 @@ def crawler():
             "title": title,
             "text": text,
             "emb": embed(text),
-            "quality": quality
+            "quality": score
         })
 
         save_index()
 
-        for l in links[:2]:
+        # 🔥 prioridad basada en calidad del contenido
+        for l in links[:3]:
             if l not in VISITED:
-                crawl_queue.put(l)
+                add_to_queue(l, score)
 
 threading.Thread(target=crawler, daemon=True).start()
 
@@ -158,7 +155,6 @@ def search_engine(q):
 
     for item in INDEX:
         sim = cosine(q_emb, item["emb"])
-
         score = sim * item["quality"]
 
         if score > 0.22:
@@ -186,7 +182,7 @@ def render(results):
     """
 
     if not results:
-        html += "<p>No results found</p>"
+        html += "<p>No results</p>"
 
     for r in results:
         domain = r["url"].split("/")[2] if "://" in r["url"] else r["url"]
@@ -219,7 +215,7 @@ def crawl():
     if not url:
         return "No URL"
 
-    crawl_queue.put(url)
+    add_to_queue(url, 1.0)
     return f"Queued: {url}"
 
 @app.route("/health")
@@ -228,7 +224,7 @@ def health():
         "status": "ok",
         "uptime": int(time.time() - START_TIME),
         "index": len(INDEX),
-        "queue": crawl_queue.qsize(),
+        "queue": len(crawl_queue),
         "cache": len(CACHE)
     }
 
@@ -251,7 +247,7 @@ def home():
             <button>Crawl</button>
         </form>
 
-        <p>Filtered indexing + semantic ranking</p>
+        <p>Priority crawling + quality scoring</p>
     </body>
     </html>
     """
