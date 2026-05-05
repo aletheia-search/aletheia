@@ -3,7 +3,6 @@ import numpy as np
 from flask import Flask, request, jsonify, render_template_string
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import KMeans
-from urllib.parse import urlparse
 
 # =========================
 # CONFIG
@@ -31,64 +30,100 @@ embs = model.encode(texts, normalize_embeddings=True)
 embs = np.array(embs)
 
 # =========================
-# CLUSTERING (NUEVO CORE)
+# INTENT MODEL (NUEVO CORE)
 # =========================
-N_CLUSTERS = 8
+INTENT_LABELS = [
+    "dev",
+    "shop",
+    "info",
+    "nav",
+    "media"
+]
 
-kmeans = KMeans(n_clusters=N_CLUSTERS, random_state=42, n_init=10)
-labels = kmeans.fit_predict(embs)
+def predict_intent(query):
+    q = query.lower()
 
-clusters = {}
+    if any(x in q for x in ["python", "code", "flask", "api"]):
+        return "dev"
 
-for i, label in enumerate(labels):
-    if label not in clusters:
-        clusters[label] = []
+    if any(x in q for x in ["comprar", "precio", "amazon", "producto"]):
+        return "shop"
 
-    clusters[label].append({
-        "url": urls[i],
-        "text": texts[i]
-    })
+    if any(x in q for x in ["qué es", "definición", "explica"]):
+        return "info"
 
-centroids = kmeans.cluster_centers_
+    if any(x in q for x in ["github", "login", "youtube", "google"]):
+        return "nav"
 
-# =========================
-# CLUSTER SCORE (NUEVO)
-# =========================
-def cluster_score(cluster_id):
-    items = clusters[cluster_id]
-    return len(items)
-
-# =========================
-# FIND CLOSEST CLUSTER
-# =========================
-def closest_cluster(query_emb):
-    sims = np.dot(centroids, query_emb)
-
-    return int(np.argmax(sims))
+    return "info"
 
 # =========================
-# SEARCH
+# QUERY EXPANSION (NUEVO)
+# =========================
+def expand_query(query, intent):
+    if intent == "dev":
+        return query + " tutorial documentation examples"
+
+    if intent == "shop":
+        return query + " reviews price comparison"
+
+    if intent == "info":
+        return query + " explanation summary"
+
+    return query
+
+# =========================
+# INTENT FILTERING (NUEVO)
+# =========================
+def filter_by_intent(results, intent):
+    filtered = []
+
+    for r in results:
+        url = r["url"]
+
+        if intent == "dev" and "github" in url:
+            filtered.append(r)
+        elif intent == "shop" and any(x in url for x in ["amazon", "shop"]):
+            filtered.append(r)
+        elif intent == "nav":
+            filtered.append(r)
+        elif intent == "info":
+            filtered.append(r)
+        else:
+            filtered.append(r)
+
+    return filtered
+
+# =========================
+# SEARCH CORE
 # =========================
 def search(query):
-    q_emb = model.encode([query], normalize_embeddings=True)[0]
+    intent = predict_intent(query)
+    expanded = expand_query(query, intent)
 
-    cid = closest_cluster(q_emb)
+    q_emb = model.encode([expanded], normalize_embeddings=True)[0]
 
-    cluster = clusters[cid]
+    sims = np.dot(embs, q_emb)
+
+    top_idx = np.argsort(-sims)[:12]
 
     results = []
 
-    for item in cluster:
+    for i in top_idx:
+        d = data[i]
+
         results.append({
-            "url": item["url"],
-            "desc": item["text"][:140],
-            "cluster": cid,
-            "score": cluster_score(cid)
+            "title": d.get("title",""),
+            "url": d["url"],
+            "desc": d["text"][:140],
+            "score": float(sims[i])
         })
 
+    results = filter_by_intent(results, intent)
+
     return {
-        "query_cluster": cid,
-        "clusters": len(clusters),
+        "intent": intent,
+        "expanded_query": expanded,
         "results": results[:10]
     }
 
@@ -100,18 +135,19 @@ HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>Aletheia v34</title>
+<title>Aletheia v35</title>
 <style>
 body{background:#0f0f12;color:white;font-family:Arial}
 input{width:60%;padding:14px;margin:20px}
-.cluster{color:#888;margin:10px}
+.tag{color:#888;margin:10px}
 .card{background:#1c1c22;padding:12px;border-radius:14px;margin:10px;cursor:pointer}
+.small{color:#777;font-size:12px}
 </style>
 </head>
 <body>
 
 <input id="q" placeholder="Buscar..." />
-<div id="info"></div>
+<div id="meta"></div>
 <div id="r"></div>
 
 <script>
@@ -119,8 +155,9 @@ async function go(q){
     const r = await fetch("/api?q="+encodeURIComponent(q));
     const d = await r.json();
 
-    document.getElementById("info").innerText =
-        "Cluster: " + d.query_cluster + " | Total clusters: " + d.clusters;
+    document.getElementById("meta").innerHTML =
+        "INTENT: " + d.intent + "<br>" +
+        "<span class='small'>EXPANDED: " + d.expanded_query + "</span>";
 
     let box=document.getElementById("r");
     box.innerHTML="";
@@ -130,8 +167,7 @@ async function go(q){
         c.className="card";
 
         c.innerHTML =
-            "<b>URL</b><br>"+
-            "<small>cluster "+x.cluster+"</small><br><br>"+
+            "<b>"+x.title+"</b><br><br>"+
             x.desc;
 
         c.onclick=()=>window.open(x.url);
@@ -163,5 +199,5 @@ def api():
 
 # =========================
 if __name__ == "__main__":
-    print("Aletheia v34 DYNAMIC KNOWLEDGE CLUSTERS ONLINE")
+    print("Aletheia v35 INTENT PREDICTION ENGINE ONLINE")
     app.run(host="0.0.0.0", port=8080)
