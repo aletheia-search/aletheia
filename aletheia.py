@@ -1,67 +1,61 @@
 import os
 import json
-import random
 import numpy as np
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify
 from sentence_transformers import SentenceTransformer
 
 # =========================
 # CONFIG
 # =========================
-INDEX_FILE = "index.json"
-USER_FILE = "user_profile.json"
+INDEX_FILE = "data/index.json"
+USERS_FILE = "data/users.json"
 
 app = Flask(__name__)
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # =========================
-# BASE LINKS
+# UTILIDADES JSON
 # =========================
-QUICK_LINKS = [
-    {"name": "Wikipedia", "url": "https://wikipedia.org"},
-    {"name": "GitHub", "url": "https://github.com"},
-    {"name": "ChatGPT", "url": "https://chat.openai.com"},
-    {"name": "Google", "url": "https://google.com"},
-    {"name": "Amazon", "url": "https://amazon.es"}
-]
+def load_json(path, default):
+    if not os.path.exists(path):
+        return default
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
 # =========================
-# USER PROFILE
+# USUARIOS
 # =========================
-def load_user():
-    if os.path.exists(USER_FILE):
-        with open(USER_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {
-        "clicks": {},
-        "queries": [],
-        "preferences": {}
-    }
+def get_user(user_id):
+    users = load_json(USERS_FILE, {})
+    if user_id not in users:
+        users[user_id] = {
+            "clicks": {},
+            "history": []
+        }
+        save_json(USERS_FILE, users)
+    return users[user_id], users
 
-def save_user(data):
-    with open(USER_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f)
-
-def track_click(url):
-    user = load_user()
-    user["clicks"][url] = user["clicks"].get(url, 0) + 1
-    save_user(user)
+def update_user(user_id, user_data, all_users):
+    all_users[user_id] = user_data
+    save_json(USERS_FILE, all_users)
 
 # =========================
 # INDEX
 # =========================
 def load_index():
-    if os.path.exists(INDEX_FILE):
-        with open(INDEX_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+    return load_json(INDEX_FILE, [])
 
 # =========================
 # EMBEDDINGS
 # =========================
 def embed(text):
     v = model.encode([text])[0]
-    return (v / (np.linalg.norm(v) + 1e-9)).tolist()
+    return v / (np.linalg.norm(v) + 1e-9)
 
 def cosine(a, b):
     a = np.array(a)
@@ -69,321 +63,94 @@ def cosine(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
 
 # =========================
-# ROUTER INTELIGENTE
+# ROUTER (INTENCIÓN)
 # =========================
-def route_query(q):
-    q = q.lower()
+def route(query):
+    q = query.lower()
 
-    if "github" in q:
-        return {"type": "redirect", "url": "https://github.com"}
+    if any(x in q for x in ["github", "chatgpt", "google"]):
+        return "redirect"
 
-    if "chatgpt" in q or "ia" in q:
-        return {"type": "redirect", "url": "https://chat.openai.com"}
+    if any(x in q for x in ["imagen", "fotos", "ver"]):
+        return "visual"
 
-    return {"type": "search"}
+    return "search"
 
 # =========================
-# SEARCH PERSONALIZADO
+# BUSCADOR
 # =========================
-def search(query, top_k=6):
+def search(query, user):
     index = load_index()
-    user = load_user()
 
     if not index:
         return []
 
     q_emb = embed(query)
-
     results = []
-    seen = set()
 
     for item in index:
-        url = item.get("url", "")
-        if url in seen:
-            continue
-        seen.add(url)
-
         try:
             score = cosine(q_emb, item.get("emb", []))
         except:
             continue
 
-        # 🔥 PERSONALIZACIÓN REAL
-        boost = user["clicks"].get(url, 0) * 0.05
-        final_score = score + boost
+        # personalización simple
+        clicks = user.get("clicks", {}).get(item["url"], 0)
+        score += clicks * 0.05
 
         results.append({
             "title": item.get("title", ""),
-            "url": url,
+            "url": item.get("url", ""),
             "snippet": item.get("text", "")[:160],
-            "score": final_score,
-            "favicon": "https://www.google.com/s2/favicons?sz=64&domain=" + url
+            "score": score
         })
 
     results.sort(key=lambda x: x["score"], reverse=True)
-    return results[:top_k]
+    return results[:8]
 
 # =========================
-# FEED PERSONALIZADO
+# APP
 # =========================
-def feed():
-    index = load_index()
-    user = load_user()
-
-    scored = []
-
-    for item in index:
-        url = item.get("url", "")
-        base = user["clicks"].get(url, 0)
-
-        noise = random.uniform(0, 0.4)
-        score = base + noise
-
-        scored.append({
-            "title": item.get("title", ""),
-            "url": url,
-            "snippet": item.get("text", "")[:140],
-            "score": score,
-            "favicon": "https://www.google.com/s2/favicons?sz=64&domain=" + url
-        })
-
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    return scored[:6]
-
-# =========================
-# FRONTEND
-# =========================
-HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>Aletheia v8</title>
-
-<style>
-body {
-    margin: 0;
-    font-family: Arial;
-    background: #0f0f12;
-    color: white;
-}
-
-.topbar {
-    padding: 20px;
-    text-align: center;
-}
-
-input {
-    width: 60%;
-    padding: 14px;
-    border-radius: 10px;
-    border: none;
-    font-size: 16px;
-}
-
-.section {
-    padding: 15px 20px;
-}
-
-.grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-    gap: 12px;
-}
-
-.card {
-    background: #1c1c22;
-    padding: 18px;
-    border-radius: 12px;
-    cursor: pointer;
-}
-
-.card:hover {
-    background: #2a2a33;
-}
-
-.result {
-    display: flex;
-    gap: 10px;
-    padding: 12px;
-    background: #1c1c22;
-    border-radius: 10px;
-    margin-bottom: 8px;
-    cursor: pointer;
-}
-
-.result:hover {
-    background: #2a2a33;
-}
-
-img {
-    width: 32px;
-    height: 32px;
-}
-</style>
-
-</head>
-
-<body>
-
-<div class="topbar">
-    <input id="q" placeholder="Buscar o explorar..." />
-</div>
-
-<div class="section">
-    <h4>Accesos rápidos</h4>
-    <div id="home" class="grid"></div>
-</div>
-
-<div class="section">
-    <h4>Descubrimiento personalizado</h4>
-    <div id="feed"></div>
-</div>
-
-<div class="section">
-    <h4>Resultados</h4>
-    <div id="results"></div>
-</div>
-
-<script>
-
-async function loadHome() {
-    const r = await fetch("/home");
-    const d = await r.json();
-
-    const home = document.getElementById("home");
-    home.innerHTML = "";
-
-    d.quick_links.forEach(x => {
-        const c = document.createElement("div");
-        c.className = "card";
-        c.innerText = x.name;
-        c.onclick = () => window.open(x.url, "_blank");
-        home.appendChild(c);
-    });
-}
-
-async function loadFeed() {
-    const r = await fetch("/feed");
-    const d = await r.json();
-
-    const feed = document.getElementById("feed");
-    feed.innerHTML = "";
-
-    d.forEach(x => {
-        const div = document.createElement("div");
-        div.className = "result";
-
-        div.innerHTML = `
-            <img src="${x.favicon}">
-            <div>
-                <b>${x.title}</b><br>
-                <span style="font-size:12px;opacity:0.8">${x.snippet}</span>
-            </div>
-        `;
-
-        div.onclick = () => {
-            fetch("/track?url=" + encodeURIComponent(x.url));
-            window.open(x.url, "_blank");
-        };
-
-        feed.appendChild(div);
-    });
-}
-
-async function search(q) {
-    const r = await fetch("/search?q=" + encodeURIComponent(q));
-    const d = await r.json();
-
-    const results = document.getElementById("results");
-    results.innerHTML = "";
-
-    if (d.mode === "redirect") {
-        window.location.href = d.url;
-        return;
-    }
-
-    d.results.forEach(x => {
-        const div = document.createElement("div");
-        div.className = "result";
-
-        div.innerHTML = `
-            <img src="${x.favicon}">
-            <div>
-                <b>${x.title}</b><br>
-                <span style="font-size:12px;opacity:0.8">${x.snippet}</span>
-            </div>
-        `;
-
-        div.onclick = () => {
-            fetch("/click?url=" + encodeURIComponent(x.url));
-            window.open(x.url, "_blank");
-        };
-
-        results.appendChild(div);
-    });
-}
-
-document.getElementById("q").addEventListener("keypress", e => {
-    if (e.key === "Enter") search(e.target.value);
-});
-
-loadHome();
-loadFeed();
-
-</script>
-
-</body>
-</html>
-"""
-
-# =========================
-# ROUTES
-# =========================
-
 @app.route("/")
-def ui():
-    return render_template_string(HTML)
-
-@app.route("/home")
 def home():
-    return jsonify({"quick_links": QUICK_LINKS})
+    return "Aletheia v9.1 ONLINE"
 
 @app.route("/search")
 def search_route():
-    q = request.args.get("q", "").strip()
+    q = request.args.get("q", "")
+    user_id = request.args.get("user", "default")
 
-    if not q:
-        return jsonify({"error": "empty"})
+    user, all_users = get_user(user_id)
 
-    decision = route_query(q)
+    mode = route(q)
 
-    if decision["type"] == "redirect":
-        return jsonify({"mode": "redirect", "url": decision["url"]})
+    if mode == "redirect":
+        return jsonify({"mode": "redirect"})
+
+    results = search(q, user)
 
     return jsonify({
         "mode": "search",
-        "results": search(q)
+        "results": results
     })
-
-@app.route("/feed")
-def feed_route():
-    return jsonify(feed())
 
 @app.route("/click")
 def click():
+    user_id = request.args.get("user", "default")
     url = request.args.get("url")
-    if url:
-        track_click(url)
-    return jsonify({"ok": True})
 
-@app.route("/health")
-def health():
-    return jsonify({"status": "ok"})
+    user, all_users = get_user(user_id)
+
+    user["clicks"][url] = user["clicks"].get(url, 0) + 1
+    user["history"].append(url)
+
+    update_user(user_id, user, all_users)
+
+    return jsonify({"ok": True})
 
 # =========================
 # START
 # =========================
 if __name__ == "__main__":
-    print("Aletheia v8 PERSONALIZED ONLINE")
+    print("Aletheia v9.1 RUNNING")
     app.run(host="0.0.0.0", port=8080)
