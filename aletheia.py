@@ -1,8 +1,7 @@
-from flask import Flask, request, redirect
+from flask import Flask, request
 import urllib.parse
 import sqlite3
-import requests
-from bs4 import BeautifulSoup
+import feedparser
 
 app = Flask(__name__)
 
@@ -10,18 +9,11 @@ DB = "aletheia.db"
 
 
 # -----------------------------
-# DB INIT
+# INIT DB
 # -----------------------------
 def init_db():
     conn = sqlite3.connect(DB)
     c = conn.cursor()
-
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS cache (
-            query TEXT PRIMARY KEY,
-            result TEXT
-        )
-    """)
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS clicks (
@@ -66,6 +58,31 @@ def get_click_score(url):
 
 
 # -----------------------------
+# RSS NEWS
+# -----------------------------
+def get_news(query):
+    try:
+        feed = feedparser.parse(
+            f"https://news.google.com/rss/search?q={query}&hl=es&gl=ES&ceid=ES:es"
+        )
+
+        items = []
+
+        for entry in feed.entries[:5]:
+            items.append({
+                "title": entry.title,
+                "link": entry.link,
+                "snippet": "Noticia actualizada desde Google News RSS",
+                "score": 2
+            })
+
+        return items
+
+    except:
+        return []
+
+
+# -----------------------------
 # HOME
 # -----------------------------
 @app.route("/")
@@ -90,16 +107,14 @@ def home():
 @app.route("/go")
 def go():
     url = request.args.get("url")
-
     if url:
         register_click(url)
-        return redirect(url)
-
+        return f'<script>window.open("{url}", "_blank"); window.location="/";</script>'
     return redirect("/")
 
 
 # -----------------------------
-# SEARCH
+# SEARCH ENGINE MULTI-FUENTE
 # -----------------------------
 @app.route("/search")
 def search():
@@ -113,35 +128,71 @@ def search():
     results = []
 
     def add(title, link, snippet, base_score):
-        click_boost = get_click_score(link)
         results.append({
             "title": title,
-            "link": link,
+            "link": f"/go?url={urllib.parse.quote(link, safe='')}",
             "snippet": snippet,
-            "score": base_score + click_boost
+            "score": base_score + get_click_score(link)
         })
 
     # -----------------------------
-    # INTENCIONES
+    # WIKIPEDIA / CONOCIMIENTO
     # -----------------------------
-    if "python" in ql:
-        add("Python oficial", "/go?url=https://www.python.org", "Lenguaje de programación.", 3)
-        add("Python YouTube", f"/go?url=https://www.youtube.com/results?search_query=python+tutorial", "Tutoriales Python.", 2)
-
-    if "youtube" in ql:
-        add("YouTube", f"/go?url=https://www.youtube.com/results?search_query={encoded}", "Vídeos.", 2)
-
     if "wikipedia" in ql or "que es" in ql:
-        add("Wikipedia", f"/go?url=https://es.wikipedia.org/wiki/Special:Search?search={encoded}", "Enciclopedia.", 3)
+        add(
+            "Wikipedia",
+            f"https://es.wikipedia.org/wiki/Special:Search?search={encoded}",
+            "Enciclopedia colaborativa.",
+            3
+        )
 
-    if "amazon" in ql or "comprar" in ql:
-        add("Amazon", f"/go?url=https://www.amazon.es/s?k={encoded}", "Tienda online.", 3)
-
-    if not results:
-        add("Google", f"/go?url=https://www.google.com/search?q={encoded}", "Búsqueda general.", 1)
+    if "python" in ql:
+        add(
+            "Python oficial",
+            "https://www.python.org",
+            "Lenguaje de programación.",
+            3
+        )
 
     # -----------------------------
-    # RANKING DINÁMICO
+    # VIDEO
+    # -----------------------------
+    if "youtube" in ql or "video" in ql:
+        add(
+            "YouTube",
+            f"https://www.youtube.com/results?search_query={encoded}",
+            "Plataforma de vídeos.",
+            2
+        )
+
+    # -----------------------------
+    # COMPRAS
+    # -----------------------------
+    if "amazon" in ql or "comprar" in ql:
+        add(
+            "Amazon",
+            f"https://www.amazon.es/s?k={encoded}",
+            "Tienda online.",
+            3
+        )
+
+    # -----------------------------
+    # NOTICIAS RSS (NUEVO)
+    # -----------------------------
+    news = get_news(q)
+    results.extend(news)
+
+    # fallback
+    if not results:
+        add(
+            "Google",
+            f"https://www.google.com/search?q={encoded}",
+            "Búsqueda general.",
+            1
+        )
+
+    # -----------------------------
+    # RANKING
     # -----------------------------
     results.sort(key=lambda x: x["score"], reverse=True)
 
@@ -162,7 +213,7 @@ def search():
                 {r['title']}
             </a>
             <div style="font-size:13px;color:gray;">
-                {r['snippet']} (score: {r['score']})
+                {r['snippet']}
             </div>
         </div>
         """
