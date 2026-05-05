@@ -2,10 +2,10 @@ import json
 import numpy as np
 import faiss
 import math
+import random
 from flask import Flask, request, jsonify, render_template_string, session
 from sentence_transformers import SentenceTransformer
 from urllib.parse import urlparse
-from collections import defaultdict
 
 # =========================
 # CONFIG
@@ -14,14 +14,14 @@ INDEX_FILE = "store/index.json"
 FEEDBACK_FILE = "store/feedback.json"
 
 app = Flask(__name__)
-app.secret_key = "aletheia_light_key"
+app.secret_key = "aletheia_feed_key"
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 AI_WEIGHT = 0.15
 
 # =========================
-# LOAD
+# LOAD DATA
 # =========================
 def load_json(path):
     try:
@@ -46,9 +46,9 @@ index = faiss.IndexFlatIP(embs.shape[1])
 index.add(embs)
 
 # =========================
-# SESSION MEMORY
+# SESSION PROFILE
 # =========================
-def get_session_profile():
+def get_profile():
     if "profile" not in session:
         session["profile"] = {
             "dev": 0,
@@ -60,20 +60,9 @@ def get_session_profile():
     return session["profile"]
 
 def update_profile(tag):
-    profile = get_session_profile()
+    profile = get_profile()
     profile[tag] = profile.get(tag, 0) + 1
     session["profile"] = profile
-
-# =========================
-# FEEDBACK
-# =========================
-def save_feedback():
-    with open(FEEDBACK_FILE, "w", encoding="utf-8") as f:
-        json.dump(feedback, f)
-
-def register_click(url):
-    feedback[url] = feedback.get(url, 0) + 1
-    save_feedback()
 
 # =========================
 # CLASSIFY
@@ -93,36 +82,27 @@ def classify(url):
     return "web"
 
 # =========================
-# IA ADJUST
+# SCORE
 # =========================
-def ai_adjust(url):
-    return feedback.get(url, 0) * 0.02
-
-# =========================
-# FINAL SCORE
-# =========================
-def final_score(url, semantic, clicks, tag):
-    profile = get_session_profile()
+def score(url, semantic, clicks, tag):
+    profile = get_profile()
 
     behavior = clicks * 0.1
-    ai = min(ai_adjust(url), AI_WEIGHT)
-
-    # ajuste por sesión
     session_boost = profile.get(tag, 0) * 0.03
 
-    score = (
+    ai = min(feedback.get(url, 0) * 0.02, AI_WEIGHT)
+
+    return (
         0.60 * semantic +
         0.25 * behavior +
         0.15 * ai +
         session_boost
     )
 
-    return score * (1 + math.log(1 + clicks))
-
 # =========================
 # SEARCH
 # =========================
-def search(query, k=12):
+def search(query, k=10):
     qv = model.encode([query], normalize_embeddings=True)
     qv = np.array(qv).astype("float32")
 
@@ -143,14 +123,40 @@ def search(query, k=12):
 
         update_profile(tag)
 
-        score = final_score(url, semantic, clicks, tag)
+        results.append({
+            "title": d["title"],
+            "url": url,
+            "desc": d["text"][:140],
+            "type": tag,
+            "score": score(url, semantic, clicks, tag)
+        })
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results
+
+# =========================
+# FEED (NUEVO)
+# =========================
+def feed():
+    # mezcla de señales globales + aleatoriedad controlada
+    base = random.sample(data, min(12, len(data)))
+
+    results = []
+
+    for d in base:
+        url = d["url"]
+
+        tag = classify(url)
+        clicks = feedback.get(url, 0)
+
+        semantic = np.mean(embs)  # aproximación ligera global
 
         results.append({
             "title": d["title"],
             "url": url,
-            "desc": d["text"][:160],
+            "desc": d["text"][:140],
             "type": tag,
-            "score": score
+            "score": score(url, semantic, clicks, tag)
         })
 
     results.sort(key=lambda x: x["score"], reverse=True)
@@ -164,41 +170,44 @@ HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>Aletheia v23</title>
+<title>Aletheia v24</title>
 <style>
 body{background:#0f0f12;color:white;font-family:Arial}
 input{width:60%;padding:14px;margin:20px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;padding:10px}
 .card{background:#1c1c22;padding:12px;border-radius:14px;cursor:pointer}
 .small{color:#888;font-size:12px}
+.feed{margin:10px;color:#777}
 </style>
 </head>
 <body>
 
-<input id="q" placeholder="Buscar..." />
+<input id="q" placeholder="Buscar o dejar vacío para feed..." />
 <div id="r"></div>
 
 <script>
 async function go(q){
-    const r=await fetch("/search?q="+q);
-    const d=await r.json();
+    let url = q ? "/search?q="+q : "/feed";
 
-    let box=document.getElementById("r");
-    box.innerHTML="";
+    const r = await fetch(url);
+    const d = await r.json();
 
-    let grid=document.createElement("div");
-    grid.className="grid";
+    let box = document.getElementById("r");
+    box.innerHTML = "";
+
+    let grid = document.createElement("div");
+    grid.className = "grid";
 
     d.results.forEach(x=>{
-        let c=document.createElement("div");
-        c.className="card";
+        let c = document.createElement("div");
+        c.className = "card";
 
         c.innerHTML =
             "<b>"+x.title+"</b><br>"+
             "<span class='small'>"+x.type+"</span><br><br>"+
             x.desc;
 
-        c.onclick=()=>{
+        c.onclick = ()=>{
             fetch("/click?url="+encodeURIComponent(x.url));
             window.open(x.url);
         };
@@ -209,9 +218,11 @@ async function go(q){
     box.appendChild(grid);
 }
 
-document.getElementById("q").onkeydown=e=>{
+document.getElementById("q").onkeydown = e=>{
     if(e.key==="Enter") go(e.target.value);
 }
+
+window.onload = ()=>go("");
 </script>
 
 </body>
@@ -228,13 +239,17 @@ def search_route():
     q = request.args.get("q","")
     return jsonify({"results": search(q)})
 
+@app.route("/feed")
+def feed_route():
+    return jsonify({"results": feed()})
+
 @app.route("/click")
 def click():
     url = request.args.get("url")
-    register_click(url)
+    feedback[url] = feedback.get(url, 0) + 1
     return jsonify({"ok":True})
 
 # =========================
 if __name__ == "__main__":
-    print("Aletheia v23 PERSONAL LIGHT ONLINE")
+    print("Aletheia v24 FEED INTELLIGENT ONLINE")
     app.run(host="0.0.0.0", port=8080)
