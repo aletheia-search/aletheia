@@ -26,7 +26,6 @@ VISITED = set()
 CACHE = {}
 EMB_CACHE = {}
 
-# 🔥 cola con prioridad (nuevo)
 crawl_queue = []
 
 # -----------------------------
@@ -62,31 +61,34 @@ def cosine(a, b):
     return float(np.dot(a, b))
 
 # -----------------------------
-# QUALITY
+# QUALITY CHECK FINAL (CLAVE)
 # -----------------------------
-def content_score(text):
+def valid(text):
     if not text:
-        return 0
-
-    length_score = min(len(text) / 1200, 2.0)
-    words = text.split()
-    diversity = len(set(words)) / (len(words) + 1)
-
-    return length_score * diversity
+        return False
+    if len(text) < 300:
+        return False
+    if len(set(text.split())) < 60:
+        return False
+    return True
 
 # -----------------------------
-# EXTRACT
+# EXTRACTOR ROBUSTO
 # -----------------------------
 def extract(url):
     try:
         r = requests.get(url, timeout=4)
+        if r.status_code != 200:
+            return None, None, None, 0
+
         soup = BeautifulSoup(r.text, "html.parser")
 
         title = soup.title.text if soup.title else url
+
         paragraphs = [p.text for p in soup.find_all("p")]
         text = " ".join(paragraphs)
 
-        if len(text) < 300:
+        if not valid(text):
             return None, None, None, 0
 
         text = text[:2000]
@@ -97,29 +99,28 @@ def extract(url):
             if l.startswith("http"):
                 links.append(l)
 
-        return title, text, links, content_score(text)
+        quality = min(len(text) / 1200, 2.0)
+
+        return title, text, links, quality
 
     except:
         return None, None, None, 0
 
 # -----------------------------
-# CRAWLER PRIORITARIO
+# CRAWLER SIMPLE
 # -----------------------------
-def add_to_queue(url, priority):
-    heapq.heappush(crawl_queue, (-priority, url))  # max-heap
-
 def crawler():
     while True:
         if not crawl_queue:
             time.sleep(0.2)
             continue
 
-        _, url = heapq.heappop(crawl_queue)
+        url = crawl_queue.pop(0)
 
         if url in VISITED or len(INDEX) >= MAX_INDEX:
             continue
 
-        title, text, links, score = extract(url)
+        title, text, links, quality = extract(url)
         if not text:
             continue
 
@@ -130,20 +131,19 @@ def crawler():
             "title": title,
             "text": text,
             "emb": embed(text),
-            "quality": score
+            "quality": quality
         })
 
         save_index()
 
-        # 🔥 prioridad basada en calidad del contenido
-        for l in links[:3]:
+        for l in links[:2]:
             if l not in VISITED:
-                add_to_queue(l, score)
+                crawl_queue.append(l)
 
 threading.Thread(target=crawler, daemon=True).start()
 
 # -----------------------------
-# SEARCH
+# SEARCH SAFE
 # -----------------------------
 def search_engine(q):
     if q in CACHE:
@@ -154,10 +154,13 @@ def search_engine(q):
     results = []
 
     for item in INDEX:
+        if not item.get("text"):
+            continue
+
         sim = cosine(q_emb, item["emb"])
         score = sim * item["quality"]
 
-        if score > 0.22:
+        if score > 0.23:
             results.append({
                 "title": item["title"],
                 "url": item["url"],
@@ -171,7 +174,7 @@ def search_engine(q):
     return CACHE[q]
 
 # -----------------------------
-# UI
+# RENDER FIABLE
 # -----------------------------
 def render(results):
     html = """
@@ -182,16 +185,23 @@ def render(results):
     """
 
     if not results:
-        html += "<p>No results</p>"
+        html += "<p>No results found</p>"
 
     for r in results:
-        domain = r["url"].split("/")[2] if "://" in r["url"] else r["url"]
+        try:
+            domain = r["url"].split("/")[2]
+        except:
+            domain = "unknown"
+
+        snippet = r.get("text", "")
+        if not snippet:
+            continue
 
         html += f"""
         <div style="margin-bottom:20px;">
             <a href="{r['url']}" target="_blank">{r['title']}</a>
             <div style="font-size:12px;color:gray;">{domain}</div>
-            <div style="font-size:13px;color:#444;">{r['text'][:140]}</div>
+            <div style="font-size:13px;color:#444;">{snippet[:140]}</div>
         </div>
         """
 
@@ -215,7 +225,7 @@ def crawl():
     if not url:
         return "No URL"
 
-    add_to_queue(url, 1.0)
+    crawl_queue.append(url)
     return f"Queued: {url}"
 
 @app.route("/health")
@@ -247,7 +257,7 @@ def home():
             <button>Crawl</button>
         </form>
 
-        <p>Priority crawling + quality scoring</p>
+        <p>Stable output + safe rendering</p>
     </body>
     </html>
     """
