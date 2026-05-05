@@ -20,6 +20,29 @@ model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 # -----------------------------
+# LIMITADOR SIMPLE
+# -----------------------------
+REQUESTS = {}
+LIMIT = 30  # por minuto
+
+
+def allowed(ip):
+    now = time.time()
+    window = 60
+
+    if ip not in REQUESTS:
+        REQUESTS[ip] = []
+
+    REQUESTS[ip] = [t for t in REQUESTS[ip] if now - t < window]
+
+    if len(REQUESTS[ip]) >= LIMIT:
+        return False
+
+    REQUESTS[ip].append(now)
+    return True
+
+
+# -----------------------------
 # STORAGE
 # -----------------------------
 INDEX_FILE = "index.json"
@@ -64,7 +87,7 @@ def cosine(a, b):
 
 
 # -----------------------------
-# CRAWLER QUEUE (SEPARADO)
+# CRAWLER QUEUE
 # -----------------------------
 crawl_queue = queue.Queue()
 
@@ -115,21 +138,23 @@ def crawler_worker():
 
         save_json(INDEX_FILE, INDEX)
 
-        # expandir ligeramente
         for l in links[:2]:
             if l not in VISITED:
                 crawl_queue.put(l)
 
 
-# iniciar crawler en background
 threading.Thread(target=crawler_worker, daemon=True).start()
 
 
 # -----------------------------
-# SEARCH (RÁPIDO)
+# SEARCH
 # -----------------------------
 @app.route("/search")
 def search():
+    ip = request.remote_addr
+    if not allowed(ip):
+        return "Demasiadas peticiones, espera un momento"
+
     q = request.args.get("q", "")
     if not q:
         return home()
@@ -161,17 +186,21 @@ def search():
 
 
 # -----------------------------
-# CRAWL API (NO BLOQUEANTE)
+# CRAWL
 # -----------------------------
 @app.route("/crawl")
 def crawl():
+    ip = request.remote_addr
+    if not allowed(ip):
+        return "Demasiadas peticiones"
+
     url = request.args.get("url", "")
     if not url:
         return "URL vacía"
 
     crawl_queue.put(url)
 
-    return f"Añadido a cola: {url}"
+    return f"En cola: {url}"
 
 
 # -----------------------------
@@ -182,7 +211,7 @@ def home():
     return """
     <html>
     <body style="font-family:Arial;text-align:center;margin-top:80px;">
-        <h1>Aletheia v37</h1>
+        <h1>Aletheia v38</h1>
 
         <form action="/search">
             <input name="q" placeholder="Buscar">
@@ -193,10 +222,10 @@ def home():
 
         <form action="/crawl">
             <input name="url" placeholder="Indexar URL">
-            <button>Añadir crawler</button>
+            <button>Crawl</button>
         </form>
 
-        <p>Arquitectura separada: web + crawler independiente</p>
+        <p>Control de carga + protección básica</p>
     </body>
     </html>
     """
