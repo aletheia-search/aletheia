@@ -1,191 +1,96 @@
 import json
 import numpy as np
-import time
 from flask import Flask, request, jsonify, render_template_string
 from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans
 from urllib.parse import urlparse
 
 # =========================
 # CONFIG
 # =========================
-GRAPH_FILE = "store/graph.json"
 INDEX_FILE = "store/index.json"
 
 app = Flask(__name__)
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # =========================
-# LOAD
+# LOAD DATA
 # =========================
-def load_json(path):
-    try:
-        return json.load(open(path, "r", encoding="utf-8"))
-    except:
-        return {}
-
 def load_index():
     try:
         return json.load(open(INDEX_FILE, "r", encoding="utf-8"))
     except:
         return []
 
-graph = load_json(GRAPH_FILE)
 data = load_index()
 
-# =========================
-# CLASSIFY
-# =========================
-def classify(url):
-    host = urlparse(url).netloc.lower()
-    if "github" in host: return "dev"
-    if "youtube" in host: return "media"
-    if "amazon" in host: return "shop"
-    if "wikipedia" in host: return "info"
-    return "web"
+texts = [d["text"] for d in data]
+urls = [d["url"] for d in data]
+
+embs = model.encode(texts, normalize_embeddings=True)
+embs = np.array(embs)
 
 # =========================
-# INIT GRAPH NODE
+# CLUSTERING (NUEVO CORE)
 # =========================
-def ensure_node(url):
-    if url not in graph:
-        graph[url] = {
-            "edges": {},
-            "score": 0,
-            "last": time.time()
-        }
+N_CLUSTERS = 8
 
-# =========================
-# UPDATE EDGE (NUEVO CORE)
-# =========================
-def update_edge(a, b):
-    ensure_node(a)
-    ensure_node(b)
+kmeans = KMeans(n_clusters=N_CLUSTERS, random_state=42, n_init=10)
+labels = kmeans.fit_predict(embs)
 
-    edges = graph[a]["edges"]
+clusters = {}
 
-    edges[b] = edges.get(b, 0) + 1
+for i, label in enumerate(labels):
+    if label not in clusters:
+        clusters[label] = []
 
-    graph[a]["last"] = time.time()
+    clusters[label].append({
+        "url": urls[i],
+        "text": texts[i]
+    })
+
+centroids = kmeans.cluster_centers_
 
 # =========================
-# DECAY (NUEVO)
+# CLUSTER SCORE (NUEVO)
 # =========================
-def decay_graph():
-    now = time.time()
-
-    for node in list(graph.keys()):
-        age = (now - graph[node]["last"]) / 86400
-
-        # decaimiento suave
-        graph[node]["score"] *= (0.99 ** age)
-
-        # decaimiento de edges
-        for e in list(graph[node]["edges"].keys()):
-            graph[node]["edges"][e] *= 0.98
-
-            if graph[node]["edges"][e] < 0.1:
-                del graph[node]["edges"][e]
+def cluster_score(cluster_id):
+    items = clusters[cluster_id]
+    return len(items)
 
 # =========================
-# BUILD RELATION
+# FIND CLOSEST CLUSTER
 # =========================
-def relate(url, neighbors):
-    for n in neighbors:
-        update_edge(url, n)
+def closest_cluster(query_emb):
+    sims = np.dot(centroids, query_emb)
 
-# =========================
-# GRAPH SCORE
-# =========================
-def graph_score(url):
-    if url not in graph:
-        return 0
-
-    return sum(graph[url]["edges"].values()) * 0.05
+    return int(np.argmax(sims))
 
 # =========================
-# ENTRY PICK
-# =========================
-def get_entry(query):
-    qv = model.encode([query], normalize_embeddings=True)
-    qv = np.array(qv).astype("float32")
-
-    # simplificado: primer nodo
-    return list(graph.keys())[0] if graph else None
-
-# =========================
-# PATH EXPANSION
-# =========================
-def expand(start, depth=2):
-    paths = []
-
-    def walk(node, path, d):
-        if d == 0:
-            paths.append(path)
-            return
-
-        if node not in graph:
-            return
-
-        neighbors = sorted(graph[node]["edges"].items(), key=lambda x: x[1], reverse=True)
-
-        for n, w in neighbors[:3]:
-            if n in path:
-                continue
-            walk(n, path + [n], d-1)
-
-    walk(start, [start], depth)
-
-    return paths
-
-# =========================
-# SCORE PATH
-# =========================
-def score_path(path):
-    return sum(graph_score(n) for n in path)
-
-# =========================
-# SEARCH (AUTO-ORGANIZING)
+# SEARCH
 # =========================
 def search(query):
-    decay_graph()
+    q_emb = model.encode([query], normalize_embeddings=True)[0]
 
-    entry = get_entry(query)
+    cid = closest_cluster(q_emb)
 
-    if not entry:
-        return {"results": []}
-
-    paths = expand(entry)
-
-    ranked = []
-
-    for p in paths:
-        s = score_path(p)
-
-        ranked.append({
-            "path": p,
-            "final": p[-1],
-            "score": s
-        })
-
-    ranked.sort(key=lambda x: x["score"], reverse=True)
+    cluster = clusters[cid]
 
     results = []
 
-    for r in ranked[:10]:
-        url = r["final"]
+    for item in cluster:
+        results.append({
+            "url": item["url"],
+            "desc": item["text"][:140],
+            "cluster": cid,
+            "score": cluster_score(cid)
+        })
 
-        meta = next((d for d in data if d["url"] == url), None)
-
-        if meta:
-            results.append({
-                "title": meta["title"],
-                "url": url,
-                "desc": meta["text"][:140],
-                "type": classify(url),
-                "score": r["score"]
-            })
-
-    return {"results": results}
+    return {
+        "query_cluster": cid,
+        "clusters": len(clusters),
+        "results": results[:10]
+    }
 
 # =========================
 # UI
@@ -195,17 +100,18 @@ HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>Aletheia v33</title>
+<title>Aletheia v34</title>
 <style>
 body{background:#0f0f12;color:white;font-family:Arial}
 input{width:60%;padding:14px;margin:20px}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;padding:10px}
-.card{background:#1c1c22;padding:12px;border-radius:14px;cursor:pointer}
+.cluster{color:#888;margin:10px}
+.card{background:#1c1c22;padding:12px;border-radius:14px;margin:10px;cursor:pointer}
 </style>
 </head>
 <body>
 
 <input id="q" placeholder="Buscar..." />
+<div id="info"></div>
 <div id="r"></div>
 
 <script>
@@ -213,27 +119,25 @@ async function go(q){
     const r = await fetch("/api?q="+encodeURIComponent(q));
     const d = await r.json();
 
+    document.getElementById("info").innerText =
+        "Cluster: " + d.query_cluster + " | Total clusters: " + d.clusters;
+
     let box=document.getElementById("r");
     box.innerHTML="";
-
-    let grid=document.createElement("div");
-    grid.className="grid";
 
     d.results.forEach(x=>{
         let c=document.createElement("div");
         c.className="card";
 
         c.innerHTML =
-            "<b>"+x.title+"</b><br>"+
-            "<small>"+x.type+"</small><br><br>"+
+            "<b>URL</b><br>"+
+            "<small>cluster "+x.cluster+"</small><br><br>"+
             x.desc;
 
         c.onclick=()=>window.open(x.url);
 
-        grid.appendChild(c);
+        box.appendChild(c);
     });
-
-    box.appendChild(grid);
 }
 
 document.getElementById("q").onkeydown=e=>{
@@ -259,5 +163,5 @@ def api():
 
 # =========================
 if __name__ == "__main__":
-    print("Aletheia v33 SELF-ORGANIZING GRAPH ONLINE")
+    print("Aletheia v34 DYNAMIC KNOWLEDGE CLUSTERS ONLINE")
     app.run(host="0.0.0.0", port=8080)
