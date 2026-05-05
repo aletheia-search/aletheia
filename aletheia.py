@@ -1,8 +1,10 @@
 import os
 import json
+import requests
 import numpy as np
 from flask import Flask, request, jsonify, render_template_string
 from sentence_transformers import SentenceTransformer
+from bs4 import BeautifulSoup
 
 # =========================
 # CONFIG
@@ -14,7 +16,7 @@ app = Flask(__name__)
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # =========================
-# UTIL
+# JSON HELPERS
 # =========================
 def load_json(path, default):
     if not os.path.exists(path):
@@ -48,7 +50,7 @@ def load_index():
     return load_json(INDEX_FILE, [])
 
 # =========================
-# SEARCH
+# EMBEDDINGS
 # =========================
 def embed(text):
     v = model.encode([text])[0]
@@ -59,10 +61,66 @@ def cosine(a, b):
     b = np.array(b)
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
 
+# =========================
+# INTENCIÓN
+# =========================
+def intent(query):
+    q = query.lower()
+
+    if any(x in q for x in ["imagen", "fotos", "ver"]):
+        return "visual"
+
+    if any(x in q for x in ["comprar", "precio", "amazon"]):
+        return "shopping"
+
+    if any(x in q for x in ["github", "chatgpt", "google"]):
+        return "redirect"
+
+    return "search"
+
+# =========================
+# METADATA WEB (preview real)
+# =========================
+def get_preview(url):
+    try:
+        r = requests.get(url, timeout=4)
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        title = soup.title.text if soup.title else url
+
+        desc = ""
+        d = soup.find("meta", attrs={"name": "description"})
+        if d and d.get("content"):
+            desc = d["content"]
+
+        img = ""
+        og = soup.find("meta", property="og:image")
+        if og and og.get("content"):
+            img = og["content"]
+
+        if not img:
+            img = f"https://www.google.com/s2/favicons?sz=128&domain={url}"
+
+        return {
+            "title": title,
+            "desc": desc[:140],
+            "image": img
+        }
+
+    except:
+        return {
+            "title": url,
+            "desc": "",
+            "image": f"https://www.google.com/s2/favicons?sz=128&domain={url}"
+        }
+
+# =========================
+# SEARCH
+# =========================
 def search(query, user):
     index = load_index()
-    q = embed(query)
 
+    q = embed(query)
     results = []
 
     for item in index:
@@ -74,12 +132,14 @@ def search(query, user):
         clicks = user["clicks"].get(item["url"], 0)
         score += clicks * 0.05
 
+        preview = get_preview(item["url"])
+
         results.append({
-            "title": item.get("title", ""),
-            "url": item.get("url", ""),
-            "text": item.get("text", "")[:120],
-            "favicon": f"https://www.google.com/s2/favicons?sz=64&domain={item.get('url','')}",
-            "score": score
+            "url": item["url"],
+            "score": score,
+            "title": preview["title"],
+            "desc": preview["desc"] or item.get("text", "")[:120],
+            "image": preview["image"]
         })
 
     results.sort(key=lambda x: x["score"], reverse=True)
@@ -93,7 +153,7 @@ HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>Aletheia v10</title>
+<title>Aletheia v11</title>
 
 <style>
 body {
@@ -118,38 +178,42 @@ input {
 
 .grid {
     display:grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap:12px;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap:14px;
     padding:20px;
 }
 
 .card {
     background:#1c1c22;
-    padding:14px;
     border-radius:14px;
+    overflow:hidden;
     cursor:pointer;
     transition:0.2s;
 }
 
 .card:hover {
+    transform: scale(1.03);
     background:#2a2a33;
-    transform: scale(1.02);
 }
 
-.fav {
-    width:24px;
-    height:24px;
+.img {
+    width:100%;
+    height:140px;
+    object-fit:cover;
+}
+
+.content {
+    padding:12px;
 }
 
 .title {
     font-weight:bold;
-    margin-top:8px;
+    margin-bottom:6px;
 }
 
-.text {
+.desc {
     font-size:12px;
-    opacity:0.7;
-    margin-top:6px;
+    opacity:0.75;
 }
 </style>
 
@@ -177,9 +241,11 @@ async function search(q){
         c.className = "card";
 
         c.innerHTML = `
-            <img class="fav" src="${x.favicon}">
-            <div class="title">${x.title}</div>
-            <div class="text">${x.text}</div>
+            <img class="img" src="${x.image}">
+            <div class="content">
+                <div class="title">${x.title}</div>
+                <div class="desc">${x.desc}</div>
+            </div>
         `;
 
         c.onclick = () => {
@@ -215,6 +281,11 @@ def search_route():
 
     user, all_users = get_user(user_id)
 
+    mode = intent(q)
+
+    if mode == "redirect":
+        return jsonify({"mode": "redirect"})
+
     return jsonify({
         "results": search(q, user)
     })
@@ -235,5 +306,5 @@ def click():
 # START
 # =========================
 if __name__ == "__main__":
-    print("Aletheia v10 VISUAL ONLINE")
+    print("Aletheia v11 VISUAL+PREVIEW ONLINE")
     app.run(host="0.0.0.0", port=8080)
