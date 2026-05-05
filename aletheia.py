@@ -4,15 +4,15 @@ import faiss
 import time
 from flask import Flask, request, jsonify, render_template_string
 from sentence_transformers import SentenceTransformer
-from urllib.parse import urlparse
-import os
+from urllib.parse import urlparse, urljoin
+import requests
+from bs4 import BeautifulSoup
 
 # =========================
 # CONFIG
 # =========================
 INDEX_FILE = "store/index.json"
-MEMORY_FILE = "store/memory.json"
-GLOBAL_FILE = "store/global.json"
+GRAPH_FILE = "store/graph.json"
 
 app = Flask(__name__)
 model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -33,22 +33,29 @@ def load_index():
         return []
 
 data = load_index()
-memory = load_json(MEMORY_FILE)
-global_mem = load_json(GLOBAL_FILE)
+graph = load_json(GRAPH_FILE)
 
 # =========================
-# SAVE GLOBAL
+# BUILD GRAPH INIT
 # =========================
-def save_global():
-    with open(GLOBAL_FILE, "w", encoding="utf-8") as f:
-        json.dump(global_mem, f)
+if not graph:
+    graph = {}
 
 # =========================
-# FAISS
+# EXTRACT LINKS (NUEVO)
 # =========================
-embs = np.array([d["emb"] for d in data]).astype("float32")
-index = faiss.IndexFlatIP(embs.shape[1])
-index.add(embs)
+def extract_links(url):
+    try:
+        r = requests.get(url, timeout=3)
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        links = []
+        for a in soup.find_all("a", href=True):
+            links.append(urljoin(url, a["href"]))
+
+        return links[:10]
+    except:
+        return []
 
 # =========================
 # CLASSIFY
@@ -62,55 +69,55 @@ def classify(url):
     return "web"
 
 # =========================
-# GLOBAL UPDATE (NUEVO)
+# UPDATE GRAPH (NUEVO CORE)
 # =========================
-def update_global(url, time_spent):
-    if url not in global_mem:
-        global_mem[url] = {
-            "clicks": 0,
-            "avg_time": 0,
-            "trend": 0,
-            "type": classify(url)
+def update_graph(url):
+    if url not in graph:
+        graph[url] = {
+            "links": [],
+            "neighbors": {},
+            "score": 0
         }
 
-    g = global_mem[url]
+    links = extract_links(url)
 
-    g["clicks"] += 1
+    for l in links:
+        if l == url:
+            continue
 
-    g["avg_time"] = (g["avg_time"] * (g["clicks"] - 1) + time_spent) / g["clicks"]
+        if l not in graph:
+            graph[l] = {
+                "links": [],
+                "neighbors": {},
+                "score": 0
+            }
 
-    # tendencia global
-    if time_spent > 5:
-        g["trend"] += 0.05
-    else:
-        g["trend"] -= 0.02
+        # conexión bidireccional
+        graph[url]["neighbors"][l] = graph[url]["neighbors"].get(l, 0) + 1
+        graph[l]["neighbors"][url] = graph[l]["neighbors"].get(url, 0) + 1
 
-    g["trend"] = max(0.0, min(1.0, g["trend"]))
-
-    save_global()
+    graph[url]["links"] = links
 
 # =========================
-# GLOBAL SCORE (NUEVO)
+# GRAPH SCORE (NUEVO)
 # =========================
-def global_score(url):
-    if url not in global_mem:
+def graph_score(url):
+    if url not in graph:
         return 0
 
-    g = global_mem[url]
+    g = graph[url]
 
-    return g["trend"] * 0.6 + min(g["clicks"] / 1000, 0.4)
+    neighbor_strength = sum(g["neighbors"].values()) / 10
 
-# =========================
-# MEMORY SCORE
-# =========================
-def memory_score(url):
-    if url not in memory:
-        return 0
-    return memory[url]["score"] * 0.15
+    return min(neighbor_strength, 1.0)
 
 # =========================
-# SEARCH
+# SEARCH CORE
 # =========================
+embs = np.array([d["emb"] for d in data]).astype("float32")
+index = faiss.IndexFlatIP(embs.shape[1])
+index.add(embs)
+
 def search(query, k=12):
     qv = model.encode([query], normalize_embeddings=True)
     qv = np.array(qv).astype("float32")
@@ -126,35 +133,21 @@ def search(query, k=12):
         d = data[i]
         url = d["url"]
 
+        update_graph(url)
+
         semantic = float(scores[0][list(idx[0]).index(i)])
 
-        score = (
-            semantic +
-            memory_score(url) +
-            global_score(url)
-        )
+        final = semantic + graph_score(url)
 
         results.append({
             "title": d["title"],
             "url": url,
             "desc": d["text"][:160],
             "type": classify(url),
-            "score": score
+            "score": final
         })
 
     return sorted(results, key=lambda x: x["score"], reverse=True)
-
-# =========================
-# CLICK TRACKING (NUEVO)
-# =========================
-@app.route("/click")
-def click():
-    url = request.args.get("url","")
-    t = float(request.args.get("time","5"))
-
-    update_global(url, t)
-
-    return jsonify({"ok":True})
 
 # =========================
 # UI
@@ -164,7 +157,7 @@ HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>Aletheia v30</title>
+<title>Aletheia v31</title>
 <style>
 body{background:#0f0f12;color:white;font-family:Arial}
 input{width:60%;padding:14px;margin:20px}
@@ -179,11 +172,7 @@ input{width:60%;padding:14px;margin:20px}
 <div id="r"></div>
 
 <script>
-let start=0;
-
 async function go(q){
-    start = Date.now();
-
     const r = await fetch("/api?q="+encodeURIComponent(q));
     const d = await r.json();
 
@@ -202,11 +191,7 @@ async function go(q){
             "<span class='small'>"+x.type+"</span><br><br>"+
             x.desc;
 
-        c.onclick=()=>{
-            let t=(Date.now()-start)/1000;
-            fetch("/click?url="+encodeURIComponent(x.url)+"&time="+t);
-            window.open(x.url);
-        };
+        c.onclick=()=>window.open(x.url);
 
         grid.appendChild(c);
     });
@@ -237,5 +222,5 @@ def api():
 
 # =========================
 if __name__ == "__main__":
-    print("Aletheia v30 GLOBAL RELEVANCE ENGINE ONLINE")
+    print("Aletheia v31 KNOWLEDGE GRAPH ONLINE")
     app.run(host="0.0.0.0", port=8080)
