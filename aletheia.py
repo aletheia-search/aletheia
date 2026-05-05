@@ -13,14 +13,8 @@ import urllib.parse
 
 app = Flask(__name__)
 
-# -----------------------------
-# IA
-# -----------------------------
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
-# -----------------------------
-# CONFIG
-# -----------------------------
 INDEX_FILE = "index.json"
 MAX_INDEX = 800
 
@@ -66,7 +60,30 @@ def cosine(a, b):
     return float(np.dot(a, b))
 
 # -----------------------------
-# EXTRACTOR + QUALITY SCORE
+# QUALITY FILTER (CLAVE)
+# -----------------------------
+def is_valid_content(text):
+    if not text:
+        return False
+
+    # demasiado corto = basura
+    if len(text) < 300:
+        return False
+
+    # demasiado repetitivo
+    words = text.split()
+    if len(words) < 80:
+        return False
+
+    # ratio básico de contenido útil
+    unique_ratio = len(set(words)) / (len(words) + 1)
+    if unique_ratio < 0.35:
+        return False
+
+    return True
+
+# -----------------------------
+# EXTRACTOR
 # -----------------------------
 def extract(url):
     try:
@@ -78,14 +95,12 @@ def extract(url):
         paragraphs = [p.text for p in soup.find_all("p")]
         text = " ".join(paragraphs)
 
-        # 🔥 FILTRO MÁS IMPORTANTE
-        if len(text) < 250:
-            return None, None, None
+        if not is_valid_content(text):
+            return None, None, None, None
 
         text = text[:2000]
 
-        # calidad del documento
-        quality_score = min(len(text) / 1000, 2.0)
+        quality = min(len(text) / 1200, 2.0)
 
         links = []
         for a in soup.find_all("a", href=True):
@@ -93,7 +108,7 @@ def extract(url):
             if l.startswith("http"):
                 links.append(l)
 
-        return title, text, links, quality_score
+        return title, text, links, quality
 
     except:
         return None, None, None, None
@@ -131,7 +146,7 @@ def crawler():
 threading.Thread(target=crawler, daemon=True).start()
 
 # -----------------------------
-# SEARCH ENGINE
+# SEARCH
 # -----------------------------
 def search_engine(q):
     if q in CACHE:
@@ -144,10 +159,9 @@ def search_engine(q):
     for item in INDEX:
         sim = cosine(q_emb, item["emb"])
 
-        # 🔥 ranking mejorado con calidad
-        score = sim * item.get("quality", 1.0)
+        score = sim * item["quality"]
 
-        if score > 0.2:
+        if score > 0.22:
             results.append({
                 "title": item["title"],
                 "url": item["url"],
@@ -197,8 +211,7 @@ def search():
     if not q:
         return home()
 
-    results = search_engine(q)
-    return render(results)
+    return render(search_engine(q))
 
 @app.route("/crawl")
 def crawl():
@@ -238,7 +251,7 @@ def home():
             <button>Crawl</button>
         </form>
 
-        <p>Search engine with quality ranking</p>
+        <p>Filtered indexing + semantic ranking</p>
     </body>
     </html>
     """
