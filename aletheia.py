@@ -9,7 +9,7 @@ from sentence_transformers import SentenceTransformer
 # CONFIG
 # =========================
 INDEX_FILE = "index.json"
-USAGE_FILE = "usage.json"
+USER_FILE = "user_profile.json"
 
 app = Flask(__name__)
 model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -26,22 +26,26 @@ QUICK_LINKS = [
 ]
 
 # =========================
-# MEMORY (uso)
+# USER PROFILE
 # =========================
-def load_usage():
-    if os.path.exists(USAGE_FILE):
-        with open(USAGE_FILE, "r", encoding="utf-8") as f:
+def load_user():
+    if os.path.exists(USER_FILE):
+        with open(USER_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {}
+    return {
+        "clicks": {},
+        "queries": [],
+        "preferences": {}
+    }
 
-def save_usage(data):
-    with open(USAGE_FILE, "w", encoding="utf-8") as f:
+def save_user(data):
+    with open(USER_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f)
 
-def bump(url):
-    data = load_usage()
-    data[url] = data.get(url, 0) + 1
-    save_usage(data)
+def track_click(url):
+    user = load_user()
+    user["clicks"][url] = user["clicks"].get(url, 0) + 1
+    save_user(user)
 
 # =========================
 # INDEX
@@ -65,7 +69,7 @@ def cosine(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
 
 # =========================
-# ROUTER
+# ROUTER INTELIGENTE
 # =========================
 def route_query(q):
     q = q.lower()
@@ -76,17 +80,14 @@ def route_query(q):
     if "chatgpt" in q or "ia" in q:
         return {"type": "redirect", "url": "https://chat.openai.com"}
 
-    if "amazon" in q:
-        return {"type": "redirect", "url": "https://amazon.es"}
-
     return {"type": "search"}
 
 # =========================
-# SEARCH
+# SEARCH PERSONALIZADO
 # =========================
 def search(query, top_k=6):
     index = load_index()
-    usage = load_usage()
+    user = load_user()
 
     if not index:
         return []
@@ -107,14 +108,15 @@ def search(query, top_k=6):
         except:
             continue
 
-        boost = usage.get(url, 0) * 0.03
-        final = score + boost
+        # 🔥 PERSONALIZACIÓN REAL
+        boost = user["clicks"].get(url, 0) * 0.05
+        final_score = score + boost
 
         results.append({
             "title": item.get("title", ""),
             "url": url,
             "snippet": item.get("text", "")[:160],
-            "score": final,
+            "score": final_score,
             "favicon": "https://www.google.com/s2/favicons?sz=64&domain=" + url
         })
 
@@ -122,23 +124,20 @@ def search(query, top_k=6):
     return results[:top_k]
 
 # =========================
-# 🔥 DISCOVERY ENGINE
+# FEED PERSONALIZADO
 # =========================
-def discovery_feed(limit=6):
+def feed():
     index = load_index()
-    usage = load_usage()
-
-    if not index:
-        return []
+    user = load_user()
 
     scored = []
 
     for item in index:
         url = item.get("url", "")
-        score = usage.get(url, 0)
+        base = user["clicks"].get(url, 0)
 
-        # mezcla de uso + aleatoriedad ligera
-        score = score + random.uniform(0, 0.5)
+        noise = random.uniform(0, 0.4)
+        score = base + noise
 
         scored.append({
             "title": item.get("title", ""),
@@ -149,7 +148,7 @@ def discovery_feed(limit=6):
         })
 
     scored.sort(key=lambda x: x["score"], reverse=True)
-    return scored[:limit]
+    return scored[:6]
 
 # =========================
 # FRONTEND
@@ -159,7 +158,7 @@ HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>Aletheia v7</title>
+<title>Aletheia v8</title>
 
 <style>
 body {
@@ -221,12 +220,6 @@ img {
     width: 32px;
     height: 32px;
 }
-
-.label {
-    opacity: 0.7;
-    font-size: 12px;
-    margin-bottom: 8px;
-}
 </style>
 
 </head>
@@ -234,21 +227,21 @@ img {
 <body>
 
 <div class="topbar">
-    <input id="q" placeholder="Buscar o explorar Aletheia..." />
+    <input id="q" placeholder="Buscar o explorar..." />
 </div>
 
 <div class="section">
-    <div class="label">Accesos rápidos</div>
+    <h4>Accesos rápidos</h4>
     <div id="home" class="grid"></div>
 </div>
 
 <div class="section">
-    <div class="label">Descubrir</div>
+    <h4>Descubrimiento personalizado</h4>
     <div id="feed"></div>
 </div>
 
 <div class="section">
-    <div class="label">Resultados</div>
+    <h4>Resultados</h4>
     <div id="results"></div>
 </div>
 
@@ -289,7 +282,11 @@ async function loadFeed() {
             </div>
         `;
 
-        div.onclick = () => window.open(x.url, "_blank");
+        div.onclick = () => {
+            fetch("/track?url=" + encodeURIComponent(x.url));
+            window.open(x.url, "_blank");
+        };
+
         feed.appendChild(div);
     });
 }
@@ -319,7 +316,7 @@ async function search(q) {
         `;
 
         div.onclick = () => {
-            fetch("/track?url=" + encodeURIComponent(x.url));
+            fetch("/click?url=" + encodeURIComponent(x.url));
             window.open(x.url, "_blank");
         };
 
@@ -370,19 +367,23 @@ def search_route():
     })
 
 @app.route("/feed")
-def feed():
-    return jsonify(discovery_feed())
+def feed_route():
+    return jsonify(feed())
 
-@app.route("/track")
-def track():
+@app.route("/click")
+def click():
     url = request.args.get("url")
     if url:
-        bump(url)
+        track_click(url)
     return jsonify({"ok": True})
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"})
 
 # =========================
 # START
 # =========================
 if __name__ == "__main__":
-    print("Aletheia v7 DISCOVERY ENGINE ONLINE")
+    print("Aletheia v8 PERSONALIZED ONLINE")
     app.run(host="0.0.0.0", port=8080)
