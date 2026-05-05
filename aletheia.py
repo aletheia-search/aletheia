@@ -12,35 +12,64 @@ def search():
         results.append({"title": title, "link": link, "score": score})
 
     # -----------------------------
-    # INTENCIONES CON PESO
+    # EXPANSIÓN DE CONSULTA
     # -----------------------------
+    def expand(query):
+        variations = [query]
 
-    if "python" in q:
-        add("Python oficial", "https://www.python.org", 3)
+        if "python" in query:
+            variations += [
+                "python tutorial",
+                "aprender python",
+                "python curso",
+                "python básico",
+                "python rápido"
+            ]
 
-        if "tutorial" in q or "curso" in q:
-            add("Python tutorial YouTube", f"https://www.youtube.com/results?search_query=python+tutorial", 3)
-        else:
-            add("Python YouTube", f"https://www.youtube.com/results?search_query=python", 2)
+        if "youtube" in query:
+            variations += [query.replace("youtube", "").strip()]
 
-    if "youtube" in q:
-        add("YouTube", f"https://www.youtube.com/results?search_query={encoded}", 3)
+        if "comprar" in query:
+            variations += ["amazon " + query]
 
-    if "wikipedia" in q or "que es" in q:
-        add("Wikipedia ES", f"https://es.wikipedia.org/wiki/Special:Search?search={encoded}", 3)
+        if "que es" in query:
+            variations += ["definición " + query]
 
-    if "amazon" in q or "comprar" in q:
-        add("Amazon", f"https://www.amazon.es/s?k={encoded}", 3)
+        return list(set(variations))
 
-    if "noticias" in q:
-        add("Google News", f"https://www.google.com/search?q={encoded}", 2)
+    queries = expand(q)
+
+    # -----------------------------
+    # GENERACIÓN DE RESULTADOS
+    # -----------------------------
+    for item in queries:
+
+        enc = urllib.parse.quote(item)
+
+        if "python" in item:
+            add("Python oficial", "https://www.python.org", 3)
+
+        if "tutorial" in item:
+            add("Python tutorial YouTube", f"https://www.youtube.com/results?search_query={enc}", 3)
+
+        if "curso" in item:
+            add("Curso Python YouTube", f"https://www.youtube.com/results?search_query={enc}", 3)
+
+        if "youtube" in item:
+            add("YouTube", f"https://www.youtube.com/results?search_query={enc}", 2)
+
+        if "wikipedia" in item or "que es" in item:
+            add("Wikipedia ES", f"https://es.wikipedia.org/wiki/Special:Search?search={enc}", 3)
+
+        if "amazon" in item or "comprar" in item:
+            add("Amazon", f"https://www.amazon.es/s?k={enc}", 3)
 
     # fallback
     if not results:
         add("Google", f"https://www.google.com/search?q={encoded}", 1)
 
     # -----------------------------
-    # ORDENAR POR SCORE
+    # RANKING
     # -----------------------------
     results.sort(key=lambda x: x["score"], reverse=True)
 
@@ -65,9 +94,6 @@ def search():
             <a href="{r['link']}" target="_blank" style="font-size:18px;">
                 {r['title']}
             </a>
-            <div style="font-size:12px;color:gray;">
-                score: {r['score']}
-            </div>
         </div>
         """
 
