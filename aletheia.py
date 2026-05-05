@@ -7,6 +7,7 @@ from sentence_transformers import SentenceTransformer
 import json
 import os
 import hashlib
+import time
 
 app = Flask(__name__)
 
@@ -21,37 +22,36 @@ _ = model.encode(["warmup"])
 # PERSISTENCIA
 # -----------------------------
 INDEX_FILE = "index.json"
+CRAWL_QUEUE_FILE = "queue.json"
+
+MAX_INDEX = 800
+MAX_PER_RUN = 10
+MAX_DEPTH = 2
 
 
-def load_index():
-    if os.path.exists(INDEX_FILE):
-        with open(INDEX_FILE, "r") as f:
+def load_json(path, default):
+    if os.path.exists(path):
+        with open(path, "r") as f:
             return json.load(f)
-    return []
+    return default
 
 
-def save_index():
-    with open(INDEX_FILE, "w") as f:
-        json.dump(INDEX, f)
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f)
 
 
-INDEX = load_index()
-
-
-# -----------------------------
-# LINK GRAPH (para PageRank)
-# -----------------------------
-GRAPH = {}
-PAGERANK = {}
-
-
-def hash_url(u):
-    return hashlib.md5(u.encode()).hexdigest()
+INDEX = load_json(INDEX_FILE, [])
+QUEUE = load_json(CRAWL_QUEUE_FILE, [])
 
 
 # -----------------------------
-# REBUILD EMBEDDINGS
+# UTIL
 # -----------------------------
+def hash_url(url):
+    return hashlib.md5(url.encode()).hexdigest()
+
+
 def rebuild_embeddings():
     for item in INDEX:
         if "emb" not in item:
@@ -62,7 +62,7 @@ rebuild_embeddings()
 
 
 # -----------------------------
-# EXTRACCIÓN
+# EXTRACT
 # -----------------------------
 def extract(url):
     try:
@@ -84,26 +84,26 @@ def extract(url):
 
 
 # -----------------------------
-# CRAWLER
+# CRAWL CONTINUO (CONTROLADO)
 # -----------------------------
 @app.route("/crawl")
 def crawl():
-    start = request.args.get("url", "")
-    if not start:
-        return "URL vacía"
+    global QUEUE, INDEX
 
-    visited = set()
-    queue = [(start, 0)]
-    MAX_DEPTH = 1
+    start = request.args.get("url", "").strip()
 
-    while queue:
-        url, depth = queue.pop(0)
+    if start and not QUEUE:
+        QUEUE.append({"url": start, "depth": 0})
+
+    processed = 0
+
+    while QUEUE and processed < MAX_PER_RUN and len(INDEX) < MAX_INDEX:
+        item = QUEUE.pop(0)
+        url = item["url"]
+        depth = item["depth"]
+
         if depth > MAX_DEPTH:
             continue
-        if url in visited:
-            continue
-
-        visited.add(url)
 
         title, text, links = extract(url)
         if not text:
@@ -118,41 +118,15 @@ def crawl():
             "emb": emb
         })
 
-        GRAPH[url] = links[:5]
-
         for l in links[:5]:
-            queue.append((l, depth + 1))
+            QUEUE.append({"url": l, "depth": depth + 1})
 
-    compute_pagerank()
-    save_index()
+        processed += 1
 
-    return f"Indexadas: {len(INDEX)} páginas"
+    save_json(INDEX_FILE, INDEX)
+    save_json(CRAWL_QUEUE_FILE, QUEUE)
 
-
-# -----------------------------
-# PAGE RANK (ITERATIVO)
-# -----------------------------
-def compute_pagerank(iterations=10, d=0.85):
-    global PAGERANK
-
-    nodes = set(GRAPH.keys())
-
-    for n in nodes:
-        PAGERANK[n] = 1.0 / len(nodes) if nodes else 1
-
-    for _ in range(iterations):
-        new_rank = {}
-
-        for node in nodes:
-            rank_sum = 0.0
-
-            for src, outs in GRAPH.items():
-                if node in outs:
-                    rank_sum += PAGERANK.get(src, 0) / max(len(outs), 1)
-
-            new_rank[node] = (1 - d) + d * rank_sum
-
-        PAGERANK = new_rank
+    return f"Crawled {processed} páginas | Index: {len(INDEX)} | Queue: {len(QUEUE)}"
 
 
 # -----------------------------
@@ -167,7 +141,7 @@ def cosine(a, b):
 # -----------------------------
 @app.route("/search")
 def search():
-    q = request.args.get("q", "")
+    q = request.args.get("q", "").strip()
     if not q:
         return "vacío"
 
@@ -178,9 +152,7 @@ def search():
     for item in INDEX:
         sim = cosine(q_emb, item["emb"])
 
-        pr = PAGERANK.get(item["url"], 0.5)
-
-        score = (sim * 10) + (pr * 2)
+        score = sim * 10
 
         if score > 2:
             results.append({
@@ -215,7 +187,7 @@ def home():
     return """
     <html>
     <body style="font-family:Arial;text-align:center;margin-top:60px;">
-        <h1>Aletheia PageRank</h1>
+        <h1>Aletheia v26</h1>
 
         <form action="/search">
             <input name="q" style="padding:10px;width:60%;">
@@ -226,8 +198,10 @@ def home():
 
         <form action="/crawl">
             <input name="url" style="padding:10px;width:60%;">
-            <button>Crawl</button>
+            <button>Iniciar crawl</button>
         </form>
+
+        <p>El crawler continúa desde donde lo dejaste.</p>
 
     </body>
     </html>
