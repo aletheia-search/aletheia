@@ -1,12 +1,18 @@
 import json
+import requests
+from bs4 import BeautifulSoup
 import numpy as np
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify
 from sentence_transformers import SentenceTransformer
+import threading
+import time
+import os
 
 # =========================
 # CONFIG
 # =========================
 INDEX_FILE = "store/index.json"
+MEMORY_FILE = "store/memory.json"
 
 app = Flask(__name__)
 model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -14,193 +20,190 @@ model = SentenceTransformer("all-MiniLM-L6-v2")
 # =========================
 # LOAD DATA
 # =========================
-def load_index():
+def load_json(path):
     try:
-        return json.load(open(INDEX_FILE, "r", encoding="utf-8"))
+        return json.load(open(path, "r", encoding="utf-8"))
     except:
         return []
 
-data = load_index()
+data = load_json(INDEX_FILE)
+memory = load_json(MEMORY_FILE)
 
-texts = [d["text"] for d in data]
-urls = [d["url"] for d in data]
-
-embs = model.encode(texts, normalize_embeddings=True)
-embs = np.array(embs)
-
-# =========================
-# INTENT LAYER
-# =========================
-def intent(query):
-    q = query.lower()
-
-    if any(x in q for x in ["python", "api", "flask"]):
-        return "dev"
-    if any(x in q for x in ["comprar", "precio"]):
-        return "shop"
-    if any(x in q for x in ["qué es", "explica"]):
-        return "info"
-    return "info"
+def save_index():
+    os.makedirs("store", exist_ok=True)
+    with open(INDEX_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f)
 
 # =========================
-# CONTEXT LAYER
+# EMBEDDINGS
 # =========================
-session_state = {
-    "intent": None,
-    "history": []
-}
+def rebuild_embeddings():
+    texts = [d["text"] for d in data]
+    return model.encode(texts, normalize_embeddings=True)
 
-def update_context(query, intent):
-    session_state["intent"] = intent
-    session_state["history"].append(query)
-
-    if len(session_state["history"]) > 10:
-        session_state["history"] = session_state["history"][-10:]
+embs = rebuild_embeddings()
 
 # =========================
-# UTILITY SCORE (NUEVO CORE)
+# GAP DETECTOR (NUEVO CORE)
 # =========================
-def utility_score(text, intent):
-    base = len(text) / 1000
+def detect_gaps():
+    scores = {}
 
-    if intent == "dev" and "code" in text.lower():
-        base += 0.2
-    if intent == "shop" and any(x in text.lower() for x in ["price", "buy"]):
-        base += 0.2
-    if intent == "info":
-        base += 0.1
+    for m in memory:
+        q = m["query"]
 
-    return base
+        scores[q] = scores.get(q, 0) + 1
+
+    gaps = sorted(scores.items(), key=lambda x: x[1])
+
+    return [g[0] for g in gaps[:5]]
 
 # =========================
-# ACTION SCORE (CLAVE DEL SISTEMA)
+# QUERY GENERATOR (NUEVO)
 # =========================
-def action_score(query, emb, text, intent):
+def generate_queries():
+    gaps = detect_gaps()
+
+    generated = []
+
+    for g in gaps:
+        if "python" in g:
+            generated.append(g + " advanced tutorial")
+        elif "api" in g:
+            generated.append(g + " best practices")
+        else:
+            generated.append(g + " explanation")
+
+    return generated
+
+# =========================
+# CRAWLER (NUEVO CORE)
+# =========================
+def crawl(url):
+    try:
+        r = requests.get(url, timeout=5)
+
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        text = " ".join([p.text for p in soup.find_all("p")])
+
+        if len(text) < 200:
+            return None
+
+        title = soup.title.text if soup.title else url
+
+        return {
+            "url": url,
+            "title": title,
+            "text": text[:3000]
+        }
+
+    except:
+        return None
+
+# =========================
+# AUTO INGESTION (NUEVO)
+# =========================
+def ingest(item):
+    data.append(item)
+
+    global embs
+    embs = rebuild_embeddings()
+
+    save_index()
+
+# =========================
+# AUTONOMOUS LOOP (NUEVO CORE)
+# =========================
+def autonomous_loop():
+    while True:
+        queries = generate_queries()
+
+        for q in queries:
+            # simulación de búsqueda externa
+            url = "https://example.com/" + q.replace(" ", "_")
+
+            item = crawl(url)
+
+            if item:
+                ingest(item)
+
+        time.sleep(30)
+
+# =========================
+# SEARCH (SIMPLIFICADO)
+# =========================
+def search(query):
     q_emb = model.encode([query], normalize_embeddings=True)[0]
 
-    semantic = np.dot(emb, q_emb)
+    scores = np.dot(embs, q_emb)
 
-    utility = utility_score(text, intent)
-
-    continuity = semantic * 0.3 + utility * 0.7
-
-    return continuity
-
-# =========================
-# DECISION ENGINE (NUEVO CORE)
-# =========================
-def decide(query):
-    i = intent(query)
-    update_context(query, i)
+    idx = np.argsort(-scores)[:10]
 
     results = []
 
-    for idx, emb in enumerate(embs):
-        d = data[idx]
-
-        score = action_score(
-            query,
-            emb,
-            d["text"],
-            i
-        )
+    for i in idx:
+        d = data[i]
 
         results.append({
             "title": d.get("title",""),
             "url": d["url"],
             "desc": d["text"][:140],
-            "score": score
+            "score": float(scores[i])
         })
 
-    results.sort(key=lambda x: x["score"], reverse=True)
-
-    best_action = results[0] if results else None
-
     return {
-        "intent": i,
-        "best_action": best_action,
-        "results": results[:10],
-        "context": session_state
+        "results": results,
+        "auto_crawl_active": True,
+        "knowledge_size": len(data)
     }
 
 # =========================
-# UI
+# START AUTONOMOUS THREAD
 # =========================
-HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>Aletheia v39</title>
-<style>
-body{background:#0f0f12;color:white;font-family:Arial}
-input{width:60%;padding:14px;margin:20px}
-.card{background:#1c1c22;padding:12px;border-radius:14px;margin:10px;cursor:pointer}
-.best{border:1px solid #4caf50}
-.meta{color:#888;margin:10px}
-.small{color:#777;font-size:12px}
-</style>
-</head>
-<body>
+threading.Thread(target=autonomous_loop, daemon=True).start()
 
-<input id="q" placeholder="Buscar..." />
-<div class="meta" id="m"></div>
-<div id="r"></div>
-
-<script>
-async function go(q){
-    const r = await fetch("/api?q="+encodeURIComponent(q));
-    const d = await r.json();
-
-    document.getElementById("m").innerHTML =
-        "INTENT: " + d.intent + "<br>" +
-        "BEST ACTION: " + (d.best_action ? d.best_action.title : "");
-
-    let box=document.getElementById("r");
-    box.innerHTML="";
-
-    d.results.forEach(x=>{
-        let c=document.createElement("div");
-
-        c.className="card";
-
-        if(d.best_action && x.url === d.best_action.url){
-            c.classList.add("best");
-        }
-
-        c.innerHTML =
-            "<b>"+x.title+"</b><br><br>"+
-            "<span class='small'>score: "+x.score.toFixed(3)+"</span><br><br>"+
-            x.desc;
-
-        c.onclick=()=>window.open(x.url);
-
-        box.appendChild(c);
-    });
-}
-
-document.getElementById("q").onkeydown=e=>{
-    if(e.key==="Enter") go(e.target.value);
-}
-
-window.onload=()=>go("");
-</script>
-
-</body>
-</html>
-"""
+# =========================
+@app.route("/api")
+def api():
+    q = request.args.get("q","")
+    return jsonify(search(q))
 
 # =========================
 @app.route("/")
 def home():
-    return HTML
+    return """
+    <html>
+    <body style="background:#111;color:white;font-family:Arial">
+    <h2>Aletheia v41</h2>
+    <input id="q" style="padding:10px;width:60%">
+    <div id="r"></div>
 
-@app.route("/api")
-def api():
-    q = request.args.get("q","")
-    return jsonify(decide(q))
+    <script>
+    async function go(){
+        let q=document.getElementById("q").value;
+        let r=await fetch("/api?q="+q);
+        let d=await r.json();
+
+        let box=document.getElementById("r");
+        box.innerHTML="";
+
+        d.results.forEach(x=>{
+            let div=document.createElement("div");
+            div.innerHTML="<b>"+x.title+"</b><br>"+x.desc;
+            box.appendChild(div);
+        });
+    }
+
+    document.getElementById("q").onkeydown=e=>{
+        if(e.key==="Enter") go();
+    }
+    </script>
+    </body>
+    </html>
+    """
 
 # =========================
 if __name__ == "__main__":
-    print("Aletheia v39 COGNITIVE DECISION ENGINE ONLINE")
+    print("Aletheia v41 AUTONOMOUS CRAWLER ONLINE")
     app.run(host="0.0.0.0", port=8080)
