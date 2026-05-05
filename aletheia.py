@@ -13,6 +13,17 @@ app = Flask(__name__)
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # =========================
+# ACCESOS RÁPIDOS (HOME)
+# =========================
+QUICK_LINKS = [
+    {"name": "Wikipedia", "url": "https://wikipedia.org"},
+    {"name": "GitHub", "url": "https://github.com"},
+    {"name": "ChatGPT", "url": "https://chat.openai.com"},
+    {"name": "Google", "url": "https://google.com"},
+    {"name": "Amazon", "url": "https://amazon.es"},
+]
+
+# =========================
 # LOAD INDEX
 # =========================
 def load_index():
@@ -22,12 +33,11 @@ def load_index():
     return []
 
 # =========================
-# EMBEDDING + SIMILARITY
+# EMBEDDINGS
 # =========================
 def embed(text):
     v = model.encode([text])[0]
-    norm = np.linalg.norm(v) + 1e-9
-    return (v / norm).tolist()
+    return (v / (np.linalg.norm(v) + 1e-9)).tolist()
 
 def cosine(a, b):
     a = np.array(a)
@@ -35,7 +45,33 @@ def cosine(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
 
 # =========================
-# SEARCH CORE
+# ROUTER DE INTENCIÓN
+# =========================
+def route_query(q):
+    q = q.lower()
+
+    # navegación directa
+    if "github" in q:
+        return {"type": "direct", "url": "https://github.com"}
+
+    if "chatgpt" in q or "ia" == q or "openai" in q:
+        return {"type": "direct", "url": "https://chat.openai.com"}
+
+    if "wikipedia" in q:
+        return {"type": "direct", "url": "https://wikipedia.org"}
+
+    # intención de compra
+    if "comprar" in q or "tienda" in q:
+        return {"type": "search"}
+
+    # información general
+    if "qué es" in q:
+        return {"type": "search"}
+
+    return {"type": "search"}
+
+# =========================
+# SEARCH ENGINE
 # =========================
 def search(query, top_k=5):
     index = load_index()
@@ -45,8 +81,15 @@ def search(query, top_k=5):
 
     q_emb = embed(query)
     results = []
+    seen = set()
 
     for item in index:
+        url = item.get("url", "")
+
+        if url in seen:
+            continue
+        seen.add(url)
+
         try:
             score = cosine(q_emb, item.get("emb", []))
         except:
@@ -54,41 +97,50 @@ def search(query, top_k=5):
 
         results.append({
             "title": item.get("title", ""),
-            "url": item.get("url", ""),
-            "score": float(score),
-            "text": item.get("text", "")[:250]
+            "url": url,
+            "score": score,
+            "text": item.get("text", "")[:200]
         })
 
-    # filtro mínimo de ruido
-    results = [r for r in results if r["score"] > 0.25]
-
-    # orden
+    results = [r for r in results if r["score"] > 0.28]
     results.sort(key=lambda x: x["score"], reverse=True)
 
     return results[:top_k]
 
 # =========================
-# API
+# ENDPOINTS
 # =========================
+
 @app.route("/")
 def home():
-    return "Aletheia SEARCH ONLINE"
+    return jsonify({
+        "quick_links": QUICK_LINKS
+    })
 
 @app.route("/search")
 def search_route():
     q = request.args.get("q", "").strip()
 
     if not q:
+        return jsonify({"error": "empty query"})
+
+    decision = route_query(q)
+
+    # 🔵 caso 1: redirección directa
+    if decision["type"] == "direct":
         return jsonify({
-            "error": "empty query"
+            "mode": "redirect",
+            "url": decision["url"]
         })
 
+    # 🔎 caso 2: búsqueda normal
     results = search(q)
 
     return jsonify({
+        "mode": "search",
         "query": q,
         "results": results,
-        "count": len(results)
+        "home_hint": QUICK_LINKS
     })
 
 @app.route("/health")
@@ -99,8 +151,8 @@ def health():
     })
 
 # =========================
-# START SERVER
+# START
 # =========================
 if __name__ == "__main__":
-    print("Aletheia SEARCH ONLINE")
+    print("Aletheia v3 ONLINE")
     app.run(host="0.0.0.0", port=8080)
