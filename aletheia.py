@@ -4,123 +4,107 @@ def search():
     if not q:
         return home()
 
+    import urllib.parse
     encoded = urllib.parse.quote(q)
     ql = q.lower()
 
     results = []
 
-    def score(base, match_strength, type_bonus):
-        return base + match_strength + type_bonus
+    # -----------------------------
+    # REESCRITURA DE CONSULTA
+    # -----------------------------
+    def rewrite(query):
+        q = query.lower()
 
-    def add(title, url, snippet, base, match, typ):
+        rules = [
+            (["pc lento", "ordenador lento", "va lento"], "optimizar rendimiento ordenador"),
+            (["internet no funciona", "sin internet", "wifi no va"], "solucionar problemas internet"),
+            (["como", "cómo", "tutorial"], "guía explicativa"),
+            (["arreglar", "solucionar"], "solución problema"),
+            (["python"], "python programación tutorial"),
+            (["comprar"], "mejores ofertas comprar"),
+        ]
+
+        for keys, replacement in rules:
+            if any(k in q for k in keys):
+                return replacement
+
+        return query
+
+    rq = rewrite(q)
+    rq_encoded = urllib.parse.quote(rq)
+
+    # -----------------------------
+    # INTENCIÓN SIMPLE
+    # -----------------------------
+    def intent(query):
+        if any(x in query for x in ["cómo", "como", "tutorial", "guía"]):
+            return "educational"
+        if any(x in query for x in ["comprar", "ofertas"]):
+            return "commercial"
+        if any(x in query for x in ["qué es", "que es"]):
+            return "informational"
+        return "general"
+
+    t = intent(ql)
+
+    # -----------------------------
+    # BUILDER
+    # -----------------------------
+    def add(title, link, snippet, score):
         results.append({
             "title": title,
-            "link": f"/go?url={urllib.parse.quote(url, safe='')}",
+            "link": f"/go?url={urllib.parse.quote(link, safe='')}",
             "snippet": snippet,
-            "score": score(base, match, typ)
+            "score": score
         })
 
     # -----------------------------
-    # INTELIGENCIA LIGERA (SIN MEMORIA)
+    # RESULTADOS BASADOS EN CONSULTA REESCRITA
     # -----------------------------
 
-    def match(q, keyword):
-        return 3 if keyword in q else 0
-
-    # Python
-    add(
-        "Python oficial",
-        "https://www.python.org",
-        "Lenguaje de programación de alto nivel.",
-        3,
-        match(ql, "python"),
-        2
-    )
-
-    if "tutorial" in ql or "aprender" in ql:
+    if t == "educational":
         add(
-            "Python tutorial YouTube",
-            f"https://www.youtube.com/results?search_query=python+tutorial",
-            "Aprende Python paso a paso.",
-            2,
-            match(ql, "python"),
+            "YouTube tutorial",
+            f"https://www.youtube.com/results?search_query={rq_encoded}",
+            f"Aprende sobre: {rq}",
+            4
+        )
+        add(
+            "Google cursos",
+            f"https://www.google.com/search?q={rq_encoded}+curso",
+            "Recursos educativos.",
             2
         )
 
-    # YouTube
-    if "youtube" in ql or "video" in ql:
-        add(
-            "YouTube",
-            f"https://www.youtube.com/results?search_query={encoded}",
-            "Plataforma de vídeos.",
-            2,
-            match(ql, "youtube"),
-            1
-        )
-
-    # Wikipedia
-    if "wikipedia" in ql or "que es" in ql:
-        add(
-            "Wikipedia",
-            f"https://es.wikipedia.org/wiki/Special:Search?search={encoded}",
-            "Enciclopedia libre.",
-            3,
-            match(ql, "wikipedia"),
-            2
-        )
-
-    # Amazon
-    if "amazon" in ql or "comprar" in ql:
+    elif t == "commercial":
         add(
             "Amazon",
-            f"https://www.amazon.es/s?k={encoded}",
-            "Tienda online.",
-            3,
-            match(ql, "amazon"),
+            f"https://www.amazon.es/s?k={rq_encoded}",
+            f"Resultados para: {rq}",
+            4
+        )
+
+    elif t == "informational":
+        add(
+            "Wikipedia",
+            f"https://es.wikipedia.org/wiki/Special:Search?search={rq_encoded}",
+            f"Información sobre: {rq}",
+            4
+        )
+
+    else:
+        add(
+            "Google",
+            f"https://www.google.com/search?q={rq_encoded}",
+            f"Búsqueda: {rq}",
             2
         )
 
-    # Noticias (RSS en vivo, sin guardar)
-    if "noticias" in ql:
-        import feedparser
-        feed = feedparser.parse(
-            f"https://news.google.com/rss/search?q={encoded}&hl=es&gl=ES&ceid=ES:es"
-        )
-
-        for e in feed.entries[:5]:
-            results.append({
-                "title": e.title,
-                "link": f"/go?url={urllib.parse.quote(e.link, safe='')}",
-                "snippet": "Noticia en tiempo real",
-                "score": 3
-            })
-
-    # fallback
-    if not results:
-        add(
-            "Google",
-            f"https://www.google.com/search?q={encoded}",
-            "Búsqueda general.",
-            1,
-            0,
-            0
-        )
-
     # -----------------------------
-    # DEDUPLICACIÓN
+    # ORDENAR
     # -----------------------------
-    seen = set()
-    unique = []
-
-    for r in results:
-        if r["link"] not in seen:
-            unique.append(r)
-            seen.add(r["link"])
-
-    # -----------------------------
-    # RANKING FINAL
-    # -----------------------------
-    unique.sort(key=lambda x: x["score"], reverse=True)
+    results.sort(key=lambda x: x["score"], reverse=True)
 
     # -----------------------------
     # HTML
@@ -129,17 +113,18 @@ def search():
     <html>
     <body style="font-family:Arial;margin:40px;">
         <h2>Resultados para: {q}</h2>
+        <p style="color:gray;">Consulta reinterpretada: {rq}</p>
         <hr>
     """
 
-    for r in unique:
+    for r in results:
         html += f"""
         <div style="margin:20px 0;">
             <a href="{r['link']}" style="font-size:18px;">
                 {r['title']}
             </a>
             <div style="font-size:13px;color:gray;">
-                {r['snippet']} (score: {r['score']})
+                {r['snippet']}
             </div>
         </div>
         """
