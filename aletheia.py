@@ -1,10 +1,4 @@
 from flask import Flask, request
-import urllib.parse
-import requests
-from bs4 import BeautifulSoup
-import numpy as np
-from sentence_transformers import SentenceTransformerfrom flask import Flask, request
-import urllib.parse
 import requests
 from bs4 import BeautifulSoup
 import numpy as np
@@ -15,234 +9,65 @@ import hashlib
 import time
 import threading
 import queue
+import urllib.parse
 
 app = Flask(__name__)
 
+# -----------------------------
+# MODELO IA
+# -----------------------------
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
-START_TIME = time.time()
-
+# -----------------------------
+# CONFIG
+# -----------------------------
 INDEX_FILE = "index.json"
 MAX_INDEX = 800
 
-def load_json(path, default):
-    if os.path.exists(path):
-        with open(path, "r") as f:
-            return json.load(f)
-    return default
-
-def save_json(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f)
-
-INDEX = load_json(INDEX_FILE, [])
+# -----------------------------
+# ESTADO
+# -----------------------------
+START_TIME = time.time()
+INDEX = []
 VISITED = set()
 
-EMB = {}
-
-def embed(text):
-    h = hashlib.md5(text.encode()).hexdigest()
-    if h in EMB:
-        return EMB[h]
-    v = model.encode([text])[0]
-    EMB[h] = v
-    return v
-
-def cosine(a, b):
-    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
-
 crawl_queue = queue.Queue()
+EMB_CACHE = {}
 
-def extract(url):
-    try:
-        r = requests.get(url, timeout=4)
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        title = soup.title.text if soup.title else url
-        text = " ".join([p.text for p in soup.find_all("p")])[:1500]
-
-        links = []
-        for a in soup.find_all("a", href=True):
-            l = urllib.parse.urljoin(url, a["href"])
-            if l.startswith("http"):
-                links.append(l)
-
-        return title, text, links
-    except:
-        return None, None, []
-
-def crawler_worker():
+# -----------------------------
+# LOAD / SAVE
+# -----------------------------
+def load_index():
     global INDEX
+    if os.path.exists(INDEX_FILE):
+        with open(INDEX_FILE, "r") as f:
+            INDEX = json.load(f)
+    else:
+        INDEX = []
 
-    while True:
-        url = crawl_queue.get()
+def save_index():
+    with open(INDEX_FILE, "w") as f:
+        json.dump(INDEX, f)
 
-        if url in VISITED or len(INDEX) >= MAX_INDEX:
-            continue
-
-        title, text, links = extract(url)
-        if not text:
-            continue
-
-        VISITED.add(url)
-
-        INDEX.append({
-            "url": url,
-            "title": title,
-            "text": text,
-            "emb": embed(text)
-        })
-
-        save_json(INDEX_FILE, INDEX)
-
-        for l in links[:2]:
-            if l not in VISITED:
-                crawl_queue.put(l)
-
-threading.Thread(target=crawler_worker, daemon=True).start()
-
-@app.route("/search")
-def search():
-    q = request.args.get("q", "")
-    if not q:
-        return home()
-
-    q_emb = model.encode([q])[0]
-
-    results = []
-
-    for item in INDEX:
-        score = cosine(q_emb, item["emb"]) * 10
-        if score > 2:
-            results.append(item)
-
-    results.sort(key=lambda x: cosine(q_emb, x["emb"]), reverse=True)
-
-    html = "<html><body style='font-family:Arial;margin:40px;'><h2>Resultados</h2><hr>"
-
-    for r in results[:10]:
-        html += f"""
-        <div style="margin:20px 0;">
-            <a href="{r['url']}" target="_blank">{r['title']}</a>
-            <div style="color:gray;">{r['text'][:120]}</div>
-        </div>
-        """
-
-    html += "</body></html>"
-    return html
-
-@app.route("/crawl")
-def crawl():
-    url = request.args.get("url", "")
-    if not url:
-        return "URL vacía"
-
-    crawl_queue.put(url)
-    return f"En cola: {url}"
-
-@app.route("/")
-def home():
-    return """
-    <html>
-    <body style="font-family:Arial;text-align:center;margin-top:80px;">
-        <h1>Aletheia v40</h1>
-
-        <form action="/search">
-            <input name="q" placeholder="Buscar">
-            <button>Buscar</button>
-        </form>
-
-        <br>
-
-        <form action="/crawl">
-            <input name="url" placeholder="Indexar URL">
-            <button>Crawl</button>
-        </form>
-
-        <p>Versión lista para producción (Gunicorn)</p>
-    </body>
-    </html>
-    """
-
-@app.route("/health")
-def health():
-    return {
-        "status": "ok",
-        "uptime": int(time.time() - START_TIME),
-        "index": len(INDEX),
-        "queue": crawl_queue.qsize()
-    }
-import json
-import os
-import hashlib
-import time
-import threading
-import queue
-
-app = Flask(__name__)
+load_index()
 
 # -----------------------------
-# IA
+# EMBEDDINGS
 # -----------------------------
-model = SentenceTransformer("all-MiniLM-L6-v2")
-
-
-# -----------------------------
-# ESTADO DEL SISTEMA
-# -----------------------------
-START_TIME = time.time()
-
-
-# -----------------------------
-# STORAGE
-# -----------------------------
-INDEX_FILE = "index.json"
-MAX_INDEX = 800
-
-
-def load_json(path, default):
-    if os.path.exists(path):
-        with open(path, "r") as f:
-            return json.load(f)
-    return default
-
-
-def save_json(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f)
-
-
-INDEX = load_json(INDEX_FILE, [])
-VISITED = set()
-
-
-# -----------------------------
-# EMBEDDINGS CACHE
-# -----------------------------
-EMB = {}
-
-
 def embed(text):
     h = hashlib.md5(text.encode()).hexdigest()
-
-    if h in EMB:
-        return EMB[h]
-
+    if h in EMB_CACHE:
+        return EMB_CACHE[h]
     v = model.encode([text])[0]
-    EMB[h] = v
+    EMB_CACHE[h] = v
     return v
-
 
 def cosine(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
-
 # -----------------------------
-# CRAWLER QUEUE
+# EXTRACTOR
 # -----------------------------
-crawl_queue = queue.Queue()
-
-
 def extract(url):
     try:
         r = requests.get(url, timeout=4)
@@ -260,14 +85,11 @@ def extract(url):
         return title, text, links
     except:
         return None, None, []
-
 
 # -----------------------------
 # CRAWLER
 # -----------------------------
-def crawler_worker():
-    global INDEX
-
+def crawler():
     while True:
         url = crawl_queue.get()
 
@@ -280,26 +102,61 @@ def crawler_worker():
 
         VISITED.add(url)
 
+        emb = embed(text)
+
         INDEX.append({
             "url": url,
             "title": title,
             "text": text,
-            "emb": embed(text)
+            "emb": emb
         })
 
-        save_json(INDEX_FILE, INDEX)
+        save_index()
 
         for l in links[:2]:
             if l not in VISITED:
                 crawl_queue.put(l)
 
-
-threading.Thread(target=crawler_worker, daemon=True).start()
-
+threading.Thread(target=crawler, daemon=True).start()
 
 # -----------------------------
 # SEARCH
 # -----------------------------
+def render(results):
+    html = """
+    <html>
+    <head>
+        <style>
+            body { font-family: Arial; margin: 40px; }
+            a { font-size: 18px; text-decoration: none; color: #1a0dab; }
+            a:hover { text-decoration: underline; }
+            .item { margin-bottom: 20px; }
+            .url { font-size: 12px; color: gray; }
+            .text { font-size: 13px; color: #444; }
+        </style>
+    </head>
+    <body>
+    <h2>Aletheia Search</h2>
+    <hr>
+    """
+
+    if not results:
+        html += "<p>No results</p>"
+
+    for r in results:
+        domain = r["url"].split("/")[2] if "://" in r["url"] else r["url"]
+
+        html += f"""
+        <div class="item">
+            <a href="{r['url']}" target="_blank">{r['title']}</a>
+            <div class="url">{domain}</div>
+            <div class="text">{r['text'][:140]}</div>
+        </div>
+        """
+
+    html += "</body></html>"
+    return html
+
 @app.route("/search")
 def search():
     q = request.args.get("q", "")
@@ -312,25 +169,12 @@ def search():
 
     for item in INDEX:
         score = cosine(q_emb, item["emb"]) * 10
-
         if score > 2:
             results.append(item)
 
     results.sort(key=lambda x: cosine(q_emb, x["emb"]), reverse=True)
 
-    html = "<html><body style='font-family:Arial;margin:40px;'><h2>Resultados</h2><hr>"
-
-    for r in results[:10]:
-        html += f"""
-        <div style="margin:20px 0;">
-            <a href="{r['url']}" target="_blank">{r['title']}</a>
-            <div style="color:gray;">{r['text'][:120]}</div>
-        </div>
-        """
-
-    html += "</body></html>"
-    return html
-
+    return render(results)
 
 # -----------------------------
 # CRAWL
@@ -339,29 +183,22 @@ def search():
 def crawl():
     url = request.args.get("url", "")
     if not url:
-        return "URL vacía"
+        return "No URL"
 
     crawl_queue.put(url)
-
-    return f"En cola: {url}"
-
+    return f"Queued: {url}"
 
 # -----------------------------
-# HEALTH CHECK (NUEVO)
+# HEALTH
 # -----------------------------
 @app.route("/health")
 def health():
-    uptime = int(time.time() - START_TIME)
-
     return {
         "status": "ok",
-        "uptime_sec": uptime,
-        "index_size": len(INDEX),
-        "queue_size": crawl_queue.qsize(),
-        "visited": len(VISITED),
-        "memory_embeddings": len(EMB)
+        "uptime": int(time.time() - START_TIME),
+        "index": len(INDEX),
+        "queue": crawl_queue.qsize()
     }
-
 
 # -----------------------------
 # HOME
@@ -371,25 +208,27 @@ def home():
     return """
     <html>
     <body style="font-family:Arial;text-align:center;margin-top:80px;">
-        <h1>Aletheia v39</h1>
+        <h1>Aletheia</h1>
 
         <form action="/search">
-            <input name="q" placeholder="Buscar">
-            <button>Buscar</button>
+            <input name="q" placeholder="Search">
+            <button>Go</button>
         </form>
 
         <br>
 
         <form action="/crawl">
-            <input name="url" placeholder="Indexar URL">
+            <input name="url" placeholder="Index URL">
             <button>Crawl</button>
         </form>
 
-        <p>Incluye monitorización del sistema (/health)</p>
+        <p>Simple semantic search engine</p>
     </body>
     </html>
     """
 
-
+# -----------------------------
+# START
+# -----------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
