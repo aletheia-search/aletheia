@@ -1,5 +1,6 @@
 from flask import Flask, request
 import urllib.parse
+import math
 
 app = Flask(__name__)
 
@@ -24,7 +25,48 @@ def home():
 
 
 # -----------------------------
-# SEARCH
+# EMBEDDING LIGERO (heurístico)
+# -----------------------------
+VECTOR_SPACE = {
+    "ordenador": ["pc", "computadora", "lento", "rendimiento", "hardware"],
+    "internet": ["wifi", "red", "conexion", "router", "caido"],
+    "python": ["programacion", "codigo", "script", "lenguaje"],
+    "comprar": ["precio", "amazon", "tienda", "producto", "oferta"],
+    "video": ["youtube", "musica", "ver", "streaming"],
+    "definicion": ["que", "es", "significado", "explicacion"]
+}
+
+
+def tokenize(text):
+    return text.lower().split()
+
+
+def vectorize(text):
+    tokens = tokenize(text)
+    vec = set(tokens)
+
+    for k, v in VECTOR_SPACE.items():
+        if k in tokens:
+            vec.update(v)
+
+    return vec
+
+
+def similarity(a, b):
+    a_vec = vectorize(a)
+    b_vec = vectorize(b)
+
+    if not a_vec or not b_vec:
+        return 0
+
+    inter = len(a_vec & b_vec)
+    union = len(a_vec | b_vec)
+
+    return inter / union
+
+
+# -----------------------------
+# MOTOR
 # -----------------------------
 @app.route("/search")
 def search():
@@ -33,21 +75,8 @@ def search():
         return home()
 
     encoded = urllib.parse.quote(q)
-    ql = q.lower()
 
     results = []
-
-    STOPWORDS = {"el", "la", "de", "mi", "no", "que", "como", "por", "un", "una", "es", "va"}
-
-    def normalize(text):
-        return [w for w in text.lower().split() if w not in STOPWORDS]
-
-    def similarity(a, b):
-        a_set = set(normalize(a))
-        b_set = set(normalize(b))
-        if not a_set or not b_set:
-            return 0
-        return len(a_set & b_set) / len(a_set | b_set)
 
     def add(title, link, snippet, score):
         results.append({
@@ -58,24 +87,30 @@ def search():
         })
 
     # -----------------------------
-    # CONCEPTOS BASE
+    # BASE DE CONOCIMIENTO
     # -----------------------------
-    concepts = [
-        ("ordenador lento pc rendimiento", "https://www.google.com/search?q=optimizar+pc", "Mejorar rendimiento del ordenador"),
-        ("internet wifi conexion red", "https://www.google.com/search?q=problemas+wifi", "Solucionar problemas de red"),
-        ("python programacion codigo tutorial", "https://www.python.org", "Lenguaje de programación Python"),
-        ("comprar precio amazon tienda ofertas", "https://www.amazon.es", "Tienda online de productos"),
-        ("youtube video musica tutorial", "https://www.youtube.com", "Plataforma de vídeos"),
-        ("wikipedia que es definicion", "https://es.wikipedia.org", "Enciclopedia libre"),
+    corpus = [
+        ("Python programación código tutorial", "https://www.python.org", "Lenguaje de programación Python"),
+        ("ordenador pc lento rendimiento hardware", "https://www.google.com/search?q=optimizar+pc", "Mejorar rendimiento del PC"),
+        ("internet wifi red conexion router", "https://www.google.com/search?q=wifi+problemas", "Solución de red"),
+        ("comprar amazon precio oferta tienda", "https://www.amazon.es", "Compras online"),
+        ("youtube video musica streaming", "https://www.youtube.com", "Plataforma de vídeo"),
+        ("wikipedia que es definicion explicacion", "https://es.wikipedia.org", "Enciclopedia libre")
     ]
 
     # -----------------------------
     # MATCH SEMÁNTICO
     # -----------------------------
-    for keywords, link, snippet in concepts:
-        sim = similarity(ql, keywords)
-        if sim > 0.15:
-            add(keywords.split()[0].title(), link, snippet, sim * 10)
+    for text, link, snippet in corpus:
+        sim = similarity(q, text)
+
+        if sim > 0.12:
+            add(
+                text.split()[0].title(),
+                link,
+                snippet,
+                sim * 10
+            )
 
     # -----------------------------
     # FALLBACK
