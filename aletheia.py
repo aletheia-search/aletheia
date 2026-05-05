@@ -1,17 +1,13 @@
 import os
 import json
-import time
-import requests
 import numpy as np
 from flask import Flask, request, jsonify, render_template_string
 from sentence_transformers import SentenceTransformer
-from bs4 import BeautifulSoup
 
 # =========================
 # CONFIG
 # =========================
 INDEX_FILE = "data/index.json"
-CACHE_FILE = "data/cache.json"
 USERS_FILE = "data/users.json"
 
 app = Flask(__name__)
@@ -32,29 +28,16 @@ def save_json(path, data):
         json.dump(data, f, indent=2)
 
 # =========================
-# CACHE
-# =========================
-def load_cache():
-    return load_json(CACHE_FILE, {})
-
-def get_cached(url, cache):
-    return cache.get(url)
-
-def set_cache(url, data, cache):
-    cache[url] = data
-    save_json(CACHE_FILE, cache)
-
-# =========================
 # USERS
 # =========================
-def get_user(user_id):
+def get_user(uid):
     users = load_json(USERS_FILE, {})
-    if user_id not in users:
-        users[user_id] = {"clicks": {}}
-    return users[user_id], users
+    if uid not in users:
+        users[uid] = {"clicks": {}}
+    return users[uid], users
 
-def save_user(user_id, user, users):
-    users[user_id] = user
+def save_user(uid, user, users):
+    users[uid] = user
     save_json(USERS_FILE, users)
 
 # =========================
@@ -66,8 +49,8 @@ def load_index():
 # =========================
 # EMBEDDING
 # =========================
-def embed(text):
-    v = model.encode([text])[0]
+def embed(t):
+    v = model.encode([t])[0]
     return v / (np.linalg.norm(v) + 1e-9)
 
 def cosine(a, b):
@@ -76,57 +59,33 @@ def cosine(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
 
 # =========================
-# PREVIEW (con cache)
+# INTENT ENGINE v2
 # =========================
-def fetch_preview(url, cache):
-    cached = get_cached(url, cache)
-    if cached:
-        return cached
+def detect_intent(q):
+    q = q.lower()
 
-    try:
-        r = requests.get(url, timeout=4)
-        soup = BeautifulSoup(r.text, "html.parser")
+    shopping = ["comprar", "precio", "amazon", "tienda", "barato"]
+    direct = ["github", "chatgpt", "google", "youtube"]
+    visual = ["ver", "imagenes", "fotos", "ideas", "ejemplos"]
 
-        title = soup.title.text if soup.title else url
+    if any(x in q for x in shopping):
+        return "shopping"
 
-        desc = ""
-        d = soup.find("meta", attrs={"name": "description"})
-        if d and d.get("content"):
-            desc = d["content"]
+    if any(x in q for x in direct):
+        return "direct"
 
-        img = ""
-        og = soup.find("meta", property="og:image")
-        if og and og.get("content"):
-            img = og["content"]
+    if any(x in q for x in visual):
+        return "visual"
 
-        if not img:
-            img = f"https://www.google.com/s2/favicons?sz=128&domain={url}"
-
-        data = {
-            "title": title,
-            "desc": desc[:140],
-            "img": img
-        }
-
-        set_cache(url, data, cache)
-        return data
-
-    except:
-        data = {
-            "title": url,
-            "desc": "",
-            "img": f"https://www.google.com/s2/favicons?sz=128&domain={url}"
-        }
-        set_cache(url, data, cache)
-        return data
+    return "info"
 
 # =========================
-# SEARCH
+# SEARCH CORE
 # =========================
 def search(query, user):
     index = load_index()
-    cache = load_cache()
 
+    intent = detect_intent(query)
     q = embed(query)
 
     results = []
@@ -138,20 +97,28 @@ def search(query, user):
             continue
 
         clicks = user["clicks"].get(item["url"], 0)
+
+        # ajuste por intención (CLAVE NUEVA)
+        tag = item.get("type", "info")
+
+        if intent == tag:
+            score *= 1.3
+
+        if intent == "direct" and "github" in item["url"]:
+            score *= 1.5
+
         score += clicks * 0.05
 
-        preview = fetch_preview(item["url"], cache)
-
         results.append({
-            "url": item["url"],
+            "title": item.get("title"),
+            "url": item.get("url"),
+            "desc": item.get("text", "")[:120],
             "score": score,
-            "title": preview["title"],
-            "desc": preview["desc"] or item.get("text", "")[:120],
-            "img": preview["img"]
+            "type": tag
         })
 
     results.sort(key=lambda x: x["score"], reverse=True)
-    return results[:9]
+    return intent, results[:9]
 
 # =========================
 # FRONTEND
@@ -161,7 +128,7 @@ HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>Aletheia v12</title>
+<title>Aletheia v13</title>
 
 <style>
 body {
@@ -184,6 +151,13 @@ input {
     font-size:16px;
 }
 
+.badge {
+    display:inline-block;
+    margin-top:10px;
+    font-size:12px;
+    opacity:0.6;
+}
+
 .grid {
     display:grid;
     grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
@@ -193,25 +167,15 @@ input {
 
 .card {
     background:#1c1c22;
+    padding:14px;
     border-radius:14px;
-    overflow:hidden;
     cursor:pointer;
     transition:0.2s;
 }
 
 .card:hover {
-    transform: scale(1.03);
+    transform:scale(1.03);
     background:#2a2a33;
-}
-
-.card img {
-    width:100%;
-    height:140px;
-    object-fit:cover;
-}
-
-.content {
-    padding:12px;
 }
 
 .title {
@@ -220,8 +184,14 @@ input {
 
 .desc {
     font-size:12px;
-    opacity:0.75;
+    opacity:0.7;
     margin-top:6px;
+}
+
+.type {
+    font-size:10px;
+    opacity:0.5;
+    margin-top:8px;
 }
 </style>
 
@@ -231,6 +201,7 @@ input {
 
 <div class="top">
     <input id="q" placeholder="Buscar en Aletheia..." />
+    <div id="mode" class="badge"></div>
 </div>
 
 <div class="grid" id="results"></div>
@@ -241,6 +212,8 @@ async function search(q){
     const r = await fetch("/search?q="+encodeURIComponent(q));
     const d = await r.json();
 
+    document.getElementById("mode").innerText = "modo: " + d.intent;
+
     const box = document.getElementById("results");
     box.innerHTML = "";
 
@@ -249,15 +222,12 @@ async function search(q){
         c.className = "card";
 
         c.innerHTML = `
-            <img src="${x.img}">
-            <div class="content">
-                <div class="title">${x.title}</div>
-                <div class="desc">${x.desc}</div>
-            </div>
+            <div class="title">${x.title}</div>
+            <div class="desc">${x.desc}</div>
+            <div class="type">${x.type}</div>
         `;
 
         c.onclick = () => {
-            fetch("/click?url="+encodeURIComponent(x.url));
             window.open(x.url, "_blank");
         };
 
@@ -285,23 +255,26 @@ def home():
 @app.route("/search")
 def search_route():
     q = request.args.get("q", "")
-    user_id = request.args.get("user", "default")
+    uid = request.args.get("user", "default")
 
-    user, users = get_user(user_id)
+    user, users = get_user(uid)
+
+    intent, results = search(q, user)
 
     return jsonify({
-        "results": search(q, user)
+        "intent": intent,
+        "results": results
     })
 
 @app.route("/click")
 def click():
-    user_id = request.args.get("user", "default")
+    uid = request.args.get("user", "default")
     url = request.args.get("url")
 
-    user, users = get_user(user_id)
+    user, users = get_user(uid)
 
     user["clicks"][url] = user["clicks"].get(url, 0) + 1
-    save_user(user_id, user, users)
+    save_user(uid, user, users)
 
     return jsonify({"ok": True})
 
@@ -309,5 +282,5 @@ def click():
 # START
 # =========================
 if __name__ == "__main__":
-    print("Aletheia v12 CACHE+FAST ONLINE")
+    print("Aletheia v13 INTENT ENGINE ONLINE")
     app.run(host="0.0.0.0", port=8080)
