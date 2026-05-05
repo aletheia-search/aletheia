@@ -13,14 +13,34 @@ app = Flask(__name__)
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # =========================
-# ACCESOS RÁPIDOS (HOME)
+# HOME (launcher visual)
 # =========================
 QUICK_LINKS = [
-    {"name": "Wikipedia", "url": "https://wikipedia.org"},
-    {"name": "GitHub", "url": "https://github.com"},
-    {"name": "ChatGPT", "url": "https://chat.openai.com"},
-    {"name": "Google", "url": "https://google.com"},
-    {"name": "Amazon", "url": "https://amazon.es"},
+    {
+        "name": "Wikipedia",
+        "url": "https://wikipedia.org",
+        "icon": "wiki"
+    },
+    {
+        "name": "GitHub",
+        "url": "https://github.com",
+        "icon": "code"
+    },
+    {
+        "name": "ChatGPT",
+        "url": "https://chat.openai.com",
+        "icon": "ai"
+    },
+    {
+        "name": "Google",
+        "url": "https://google.com",
+        "icon": "search"
+    },
+    {
+        "name": "Amazon",
+        "url": "https://amazon.es",
+        "icon": "shop"
+    }
 ]
 
 # =========================
@@ -45,41 +65,36 @@ def cosine(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
 
 # =========================
-# ROUTER DE INTENCIÓN
+# INTENT ENGINE
 # =========================
 def route_query(q):
     q = q.lower()
 
-    # navegación directa
     if "github" in q:
-        return {"type": "direct", "url": "https://github.com"}
+        return {"type": "redirect", "url": "https://github.com"}
 
-    if "chatgpt" in q or "ia" == q or "openai" in q:
-        return {"type": "direct", "url": "https://chat.openai.com"}
+    if "chatgpt" in q or "ia" in q:
+        return {"type": "redirect", "url": "https://chat.openai.com"}
 
     if "wikipedia" in q:
-        return {"type": "direct", "url": "https://wikipedia.org"}
+        return {"type": "redirect", "url": "https://wikipedia.org"}
 
-    # intención de compra
-    if "comprar" in q or "tienda" in q:
-        return {"type": "search"}
-
-    # información general
-    if "qué es" in q:
-        return {"type": "search"}
+    if "amazon" in q:
+        return {"type": "redirect", "url": "https://amazon.es"}
 
     return {"type": "search"}
 
 # =========================
 # SEARCH ENGINE
 # =========================
-def search(query, top_k=5):
+def search(query, top_k=6):
     index = load_index()
 
     if not index:
         return []
 
     q_emb = embed(query)
+
     results = []
     seen = set()
 
@@ -98,8 +113,9 @@ def search(query, top_k=5):
         results.append({
             "title": item.get("title", ""),
             "url": url,
-            "score": score,
-            "text": item.get("text", "")[:200]
+            "score": float(score),
+            "snippet": item.get("text", "")[:180],
+            "image": item.get("image", "")  # preparado para futuro
         })
 
     results = [r for r in results if r["score"] > 0.28]
@@ -114,6 +130,7 @@ def search(query, top_k=5):
 @app.route("/")
 def home():
     return jsonify({
+        "mode": "home",
         "quick_links": QUICK_LINKS
     })
 
@@ -126,21 +143,21 @@ def search_route():
 
     decision = route_query(q)
 
-    # 🔵 caso 1: redirección directa
-    if decision["type"] == "direct":
+    # 🔴 redirección directa
+    if decision["type"] == "redirect":
         return jsonify({
             "mode": "redirect",
             "url": decision["url"]
         })
 
-    # 🔎 caso 2: búsqueda normal
+    # 🔎 búsqueda visual
     results = search(q)
 
     return jsonify({
-        "mode": "search",
+        "mode": "visual_search",
         "query": q,
         "results": results,
-        "home_hint": QUICK_LINKS
+        "quick_links": QUICK_LINKS
     })
 
 @app.route("/health")
@@ -154,5 +171,5 @@ def health():
 # START
 # =========================
 if __name__ == "__main__":
-    print("Aletheia v3 ONLINE")
+    print("Aletheia v4 VISUAL READY")
     app.run(host="0.0.0.0", port=8080)
