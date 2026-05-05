@@ -1,9 +1,7 @@
 import json
 import numpy as np
 import faiss
-import math
 import time
-import os
 from flask import Flask, request, jsonify, render_template_string
 from sentence_transformers import SentenceTransformer
 from urllib.parse import urlparse
@@ -18,7 +16,7 @@ app = Flask(__name__)
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # =========================
-# LOAD DATA
+# LOAD
 # =========================
 def load_json(path):
     try:
@@ -36,18 +34,29 @@ data = load_index()
 memory = load_json(MEMORY_FILE)
 
 # =========================
-# SAVE MEMORY
-# =========================
-def save_memory():
-    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(memory, f)
-
-# =========================
 # FAISS
 # =========================
 embs = np.array([d["emb"] for d in data]).astype("float32")
 index = faiss.IndexFlatIP(embs.shape[1])
 index.add(embs)
+
+# =========================
+# INTENT VECTOR (NUEVO)
+# =========================
+intent = {
+    "dev": 0.0,
+    "shop": 0.0,
+    "media": 0.0,
+    "info": 0.0,
+    "web": 0.0
+}
+
+def normalize_intent():
+    total = sum(abs(v) for v in intent.values())
+    if total == 0:
+        return
+    for k in intent:
+        intent[k] /= total
 
 # =========================
 # CLASSIFY
@@ -61,48 +70,43 @@ def classify(url):
     return "web"
 
 # =========================
-# MEMORY UPDATE (NUEVO)
+# MEMORY UPDATE
 # =========================
 def update_memory(url, tag):
     now = time.time()
 
     if url not in memory:
-        memory[url] = {
-            "count": 0,
-            "last": now,
-            "trend": 0,
-            "tag": tag
-        }
+        memory[url] = {"score": 0, "last": now, "tag": tag}
 
     m = memory[url]
 
-    age_days = (now - m["last"]) / 86400
+    age = (now - m["last"]) / 86400
+    m["score"] *= (0.98 ** age)
 
-    # decay natural
-    m["trend"] *= (0.97 ** age_days)
-
-    m["count"] += 1
+    m["score"] += 1
     m["last"] = now
-
-    # crecimiento de interés
-    m["trend"] += 1
-
     m["tag"] = tag
 
-    save_memory()
+# =========================
+# INTENT UPDATE (NUEVO)
+# =========================
+def update_intent(tag, value=0.05):
+    intent[tag] = intent.get(tag, 0) + value
+    normalize_intent()
 
 # =========================
-# MEMORY SCORE (NUEVO)
+# MEMORY SCORE
 # =========================
 def memory_score(url):
     if url not in memory:
         return 0
+    return memory[url]["score"] * 0.2
 
-    m = memory[url]
-
-    age_days = (time.time() - m["last"]) / 86400
-
-    return (m["trend"] * 0.3) * (0.98 ** age_days)
+# =========================
+# INTENT BOOST (NUEVO)
+# =========================
+def intent_score(tag):
+    return intent.get(tag, 0) * 0.5
 
 # =========================
 # SEARCH
@@ -121,15 +125,14 @@ def search(query, k=10):
 
         d = data[i]
         url = d["url"]
-
         tag = classify(url)
 
         update_memory(url, tag)
+        update_intent(tag)
 
         semantic = float(scores[0][list(idx[0]).index(i)])
-        mem = memory_score(url)
 
-        final = semantic + mem
+        final = semantic + memory_score(url) + intent_score(tag)
 
         results.append({
             "title": d["title"],
@@ -142,18 +145,16 @@ def search(query, k=10):
     return sorted(results, key=lambda x: x["score"], reverse=True)
 
 # =========================
-# FEED INTELIGENTE
+# PRE-PREDICTION FEED (NUEVO)
 # =========================
-def feed():
+def predicted_feed():
     ranked = []
 
     for d in data:
         url = d["url"]
         tag = classify(url)
 
-        update_memory(url, tag)
-
-        score = memory_score(url)
+        score = memory_score(url) + intent_score(tag)
 
         ranked.append({
             "title": d["title"],
@@ -166,13 +167,11 @@ def feed():
     return sorted(ranked, key=lambda x: x["score"], reverse=True)[:12]
 
 # =========================
-# ROUTE SIMPLE
+# ROUTER
 # =========================
-def route(query):
-    if not query:
-        return "feed"
-    if len(query) < 3:
-        return "feed"
+def route(q):
+    if not q:
+        return "predict"
     return "search"
 
 # =========================
@@ -183,7 +182,7 @@ HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>Aletheia v26</title>
+<title>Aletheia v27</title>
 <style>
 body{background:#0f0f12;color:white;font-family:Arial}
 input{width:60%;padding:14px;margin:20px}
@@ -248,11 +247,13 @@ def api():
     mode = route(q)
 
     if mode == "search":
-        return jsonify({"results": search(q)})
+        results = search(q)
     else:
-        return jsonify({"results": feed()})
+        results = predicted_feed()
+
+    return jsonify({"results": results})
 
 # =========================
 if __name__ == "__main__":
-    print("Aletheia v26 MEMORY ENGINE ONLINE")
+    print("Aletheia v27 INTENT PREDICTION ONLINE")
     app.run(host="0.0.0.0", port=8080)
