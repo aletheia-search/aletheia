@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aletheia</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+
+  <!-- 🔝 ANUNCIO SUPERIOR -->
+  <header class="ad ad-top">
+    <!-- Espacio para Google AdSense -->
+    <span>Publicidad superior</span>
+  </header>
+
+  <!-- 🔍 BUSCADOR -->
+  <main class="container">
+
+    <h1 class="logo">Aletheia</h1>
+
+    <form action="/search" method="get" class="search-box">
+      <input 
+        type="text" 
+        name="q" 
+        placeholder="Buscar en Aletheia..." 
+        autocomplete="off"
+        required
+      >
+
+      <div class="buttons">
+        <button type="submit" name="engine" value="google">Google</button>
+        <button type="submit" name="engine" value="wikipedia">Wikipedia</button>
+        <button type="submit" name="engine" value="bing">Bing</button>
+      </div>
+    </form>
+
+  </main>
+
+  <!-- 🔻 ANUNCIO INFERIOR -->
+  <footer class="ad ad-bottom">
+    <!-- Espacio para Google AdSense -->
+    <span>Publicidad inferior</span>
+  </footer>
+
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+
+</body>
+</html>
