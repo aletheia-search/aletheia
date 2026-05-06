@@ -4,47 +4,85 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Aletheia</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+
+  <!-- Si todavía no tienes /static, esto evita errores -->
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #0f172a;
+      color: white;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+      text-align: center;
+    }
+
+    header, footer {
+      background: #111827;
+      padding: 10px;
+      font-size: 14px;
+    }
+
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+    }
+
+    input {
+      width: 80%;
+      max-width: 400px;
+      padding: 12px;
+      border-radius: 8px;
+      border: none;
+      margin-bottom: 10px;
+    }
+
+    button {
+      margin: 5px;
+      padding: 10px;
+      border: none;
+      border-radius: 6px;
+      background: #2563eb;
+      color: white;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #1d4ed8;
+    }
+  </style>
+
 </head>
 
 <body>
 
-  <!-- 🔝 ANUNCIO SUPERIOR -->
-  <header class="ad ad-top">
-    <!-- Espacio para Google AdSense -->
-    <span>Publicidad superior</span>
+  <header>
+    Publicidad superior
   </header>
 
-  <!-- 🔍 BUSCADOR -->
-  <main class="container">
+  <main>
 
-    <h1 class="logo">Aletheia</h1>
+    <h1>Aletheia</h1>
 
-    <form action="/search" method="get" class="search-box">
-      <input 
-        type="text" 
-        name="q" 
-        placeholder="Buscar en Aletheia..." 
-        autocomplete="off"
-        required
-      >
+    <form action="/search" method="get">
+      <input type="text" name="q" placeholder="Buscar..." required>
 
-      <div class="buttons">
-        <button type="submit" name="engine" value="google">Google</button>
-        <button type="submit" name="engine" value="wikipedia">Wikipedia</button>
-        <button type="submit" name="engine" value="bing">Bing</button>
+      <div>
+        <button name="engine" value="google">Google</button>
+        <button name="engine" value="wikipedia">Wikipedia</button>
+        <button name="engine" value="bing">Bing</button>
       </div>
     </form>
 
   </main>
 
-  <!-- 🔻 ANUNCIO INFERIOR -->
-  <footer class="ad ad-bottom">
-    <!-- Espacio para Google AdSense -->
-    <span>Publicidad inferior</span>
+  <footer>
+    Publicidad inferior
   </footer>
-
-  <script src="{{ url_for('static', filename='script.js') }}"></script>
 
 </body>
 </html>
